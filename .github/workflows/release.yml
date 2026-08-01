@@ -1,0 +1,57 @@
+name: release
+
+# Publishes to npm on a version tag.
+#
+# The token is the only reason this is not tokenless like the Python sibling:
+# npm trusted publishing is configured per package on npmjs.com, which requires
+# the package to already exist. Once the first release is up, add the trusted
+# publisher there and this can drop NPM_TOKEN and rely on the OIDC token that
+# `id-token: write` already mints for provenance.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # provenance attestation, and OIDC if the token is dropped
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      # The tag is what a user sees; package.json is what npm records. A
+      # mismatch publishes an immutable, wrongly-numbered release - npm does not
+      # allow re-publishing a version any more than PyPI does.
+      - name: tag matches the declared version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(node -p "require('./package.json').version")
+          echo "tag=$tag declared=$declared"
+          test "$tag" = "$declared" || { echo "::error::tag $tag != package.json version $declared"; exit 1; }
+
+      - run: npm ci
+      # Publishing untested code is the failure this job exists to prevent, so
+      # the suite runs here too rather than trusting that CI was green on main.
+      - run: npx tsc --noEmit
+      - run: npm test
+
+      # Last gate before the upload: install the actual tarball and speak to it,
+      # so a `files`/`bin` mistake fails here instead of on a user's machine.
+      - name: packaged server answers over stdio
+        run: |
+          npm pack --pack-destination /tmp
+          npm install -g /tmp/ts-ast-mcp-*.tgz
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | ts-ast-mcp | grep -q '"serverInfo"'
+
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
