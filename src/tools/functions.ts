@@ -3,6 +3,7 @@ import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, extractSource, getLineRange, isExported, isArrowOrFunctionExpr, getVisibility } from "../parse.js";
 import { textResult, safeTool } from "../format.js";
+import { findTypeNode } from "./types.js";
 
 interface FuncInfo {
   name: string;
@@ -215,21 +216,34 @@ export function register(server: McpServer) {
 
   server.tool(
     "list_methods",
-    "Lists all methods for a specific class in a TypeScript/JavaScript file",
+    "Lists all methods for a specific class or interface in a TypeScript/JavaScript file",
     {
       path: z.string().describe("Absolute path to the TS/JS file"),
-      type: z.string().describe("The class name"),
+      type: z.string().describe("The class or interface name"),
     },
-    safeTool("list methods", ({ path: filePath, type: className }) => {
+    safeTool("list methods", ({ path: filePath, type: typeName }) => {
       const sf = parseFile(filePath);
-      const funcs = collectFunctions(sf).filter(f => f.className === className);
-      if (funcs.length === 0) return textResult(`No methods found for class "${className}" in ${filePath}.`);
+      // Resolve the declaration first so "no methods" and "no such type" stay
+      // distinct. Filtering collectFunctions alone conflated them, and the
+      // message said "class" either way - an interface always answered
+      // "No methods found for class X", which reads as a verdict on X rather
+      // than as this tool never having looked at it.
+      const decl = findTypeNode(sf, typeName);
+      if (!decl) return textResult(`Type "${typeName}" not found in ${filePath}.`);
 
-      const lines: string[] = [];
-      for (const f of funcs) {
-        const vis = f.visibility ? `${f.visibility} ` : "";
-        lines.push(`${vis}${f.name}${f.signature} [Lines ${f.line}-${f.endLine}]`);
-      }
+      // collectFunctions walks classes only; it feeds list_functions, where an
+      // interface member is not a function. Interfaces carry MethodSignatures.
+      const lines = ts.isInterfaceDeclaration(decl)
+        ? decl.members.filter(ts.isMethodSignature).map(m => {
+            const params = m.parameters.map(p => p.getText(sf)).join(", ");
+            const ret = m.type ? `: ${m.type.getText(sf)}` : "";
+            const [line, endLine] = getLineRange(sf, m);
+            return `${typeName}.${m.name.getText(sf)}(${params})${ret} [Lines ${line}-${endLine}]`;
+          })
+        : collectFunctions(sf).filter(f => f.className === typeName).map(f =>
+            `${f.visibility ? `${f.visibility} ` : ""}${f.name}${f.signature} [Lines ${f.line}-${f.endLine}]`);
+
+      if (lines.length === 0) return textResult(`"${typeName}" declares no methods in ${filePath}.`);
       return textResult(lines.join("\n"));
     }),
   );
