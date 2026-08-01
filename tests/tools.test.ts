@@ -12,6 +12,7 @@ const HERE = path.dirname(url.fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, "fixtures");
 const SHAPES = path.join(FIXTURES, "shapes.ts");
 const BINDINGS = path.join(FIXTURES, "bindings.ts");
+const NESTED = path.join(FIXTURES, "nested.ts");
 const SIBLING = path.join(FIXTURES, "sibling.ts");
 const DIST = path.join(HERE, "..", "dist", "index.js");
 
@@ -252,6 +253,29 @@ describe("tools over stdio", () => {
     const out = await server.call("call_graph", { path: SHAPES, scope: "package" });
     expect(out).not.toMatch(/ENOTDIR|^Failed/);
     expect(out).toContain("flowchart");
+  });
+
+  it("code_complexity does not charge a parent for its nested function", async () => {
+    const out = await server.call("code_complexity", { path: NESTED });
+    // `outer` has no branches of its own; the 5 ifs belong to nestedHelper.
+    expect(out).toMatch(/outer \(line 1\): 1\b/);
+    expect(out).toMatch(/outer\.nestedHelper \(line 2\): 6\b/);
+  });
+
+  it("code_complexity sees inside namespaces", async () => {
+    const out = await server.call("code_complexity", { path: NESTED });
+    expect(out).toContain("insideNs");
+  });
+
+  it("list_functions reports nested functions and agrees with analyze_file", async () => {
+    const listed = await server.call("list_functions", { path: NESTED });
+    expect(listed).toContain("outer.nestedHelper");
+    expect(listed).toContain("insideNs");
+
+    const analyzed = await server.call("analyze_file", { path: NESTED });
+    for (const name of ["nestedHelper", "insideNs", "simple"]) {
+      expect(analyzed).toContain(name);
+    }
   });
 
   it("list_declarations expands destructuring instead of printing the pattern", async () => {

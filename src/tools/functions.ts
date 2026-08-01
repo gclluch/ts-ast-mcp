@@ -59,29 +59,37 @@ function collectFunctions(sourceFile: ts.SourceFile): FuncInfo[] {
     }
   }
 
-  function visit(node: ts.Node) {
+  // `prefix` names nested definitions as `outer.helper`, matching
+  // code_complexity and the Python sibling. Without the recursion below,
+  // nested functions and anything inside a namespace were simply absent -
+  // and analyze_file listed them, so the two tools disagreed on one file.
+  function visit(node: ts.Node, prefix: string) {
     if (ts.isFunctionDeclaration(node) && node.name) {
+      const name = prefix + node.name.getText(sourceFile);
       const params = node.parameters.map(p => p.getText(sourceFile)).join(", ");
       const ret = node.type ? `: ${node.type.getText(sourceFile)}` : "";
       const [line, endLine] = getLineRange(sourceFile, node);
       funcs.push({
-        name: node.name.getText(sourceFile),
+        name,
         signature: `(${params})${ret}`,
         line,
         endLine,
         exported: isExported(node),
       });
+      if (node.body) ts.forEachChild(node.body, child => visit(child, `${name}.`));
+      return;
     }
 
     if (ts.isClassDeclaration(node)) {
       visitClassMembers(node);
+      return;
     }
 
     // Module-level arrow functions
     if (ts.isVariableStatement(node)) {
       for (const decl of node.declarationList.declarations) {
         if (ts.isVariableDeclaration(decl) && isArrowOrFunctionExpr(decl)) {
-          const name = decl.name.getText(sourceFile);
+          const name = prefix + decl.name.getText(sourceFile);
           const init = decl.initializer!;
           let sig = "";
           if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
@@ -97,12 +105,18 @@ function collectFunctions(sourceFile: ts.SourceFile): FuncInfo[] {
             endLine,
             exported: isExported(node),
           });
+          if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
+            if (init.body) ts.forEachChild(init.body, child => visit(child, `${name}.`));
+          }
         }
       }
+      return;
     }
+
+    ts.forEachChild(node, child => visit(child, prefix));
   }
 
-  ts.forEachChild(sourceFile, visit);
+  ts.forEachChild(sourceFile, child => visit(child, ""));
   return funcs;
 }
 
