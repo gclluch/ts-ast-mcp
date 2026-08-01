@@ -1,7 +1,7 @@
 import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseFile, extractSource, isExported, isArrowOrFunctionExpr } from "../parse.js";
+import { parseFile, extractSource, isExported, isArrowOrFunctionExpr, bindingNames } from "../parse.js";
 import { type DiffEntry, formatDiff, textResult, safeTool } from "../format.js";
 
 interface SymbolInfo {
@@ -57,14 +57,19 @@ function collectAllSymbols(sourceFile: ts.SourceFile): SymbolInfo[] {
     }
     if (ts.isVariableStatement(node)) {
       for (const decl of node.declarationList.declarations) {
-        const name = decl.name.getText(sourceFile);
         const kind = isArrowOrFunctionExpr(decl) ? "function" : "variable";
-        symbols.push({
-          name,
-          kind,
-          source: extractSource(sourceFile, node),
-          exported: isExported(node),
-        });
+        // Same expansion as list_declarations: a diff keyed on the literal
+        // `{ alpha, beta }` reports the whole pattern as one added/removed
+        // symbol, so renaming one binding looks like both appearing and
+        // disappearing.
+        for (const name of bindingNames(decl.name)) {
+          symbols.push({
+            name,
+            kind,
+            source: extractSource(sourceFile, node),
+            exported: isExported(node),
+          });
+        }
       }
     }
   }

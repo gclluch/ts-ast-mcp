@@ -45,16 +45,20 @@ function collectDeclarations(sourceFile: ts.SourceFile): DeclInfo[] {
         if (decl.initializer && (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))) {
           continue;
         }
-        const name = decl.name.getText(sourceFile);
         const type = decl.type ? decl.type.getText(sourceFile) : "<inferred>";
         const [line] = getLineRange(sourceFile, node);
-        decls.push({
-          name,
-          kind: keyword,
-          type,
-          exported: isExported(node),
-          line,
-        });
+        // Destructuring patterns must be expanded: `decl.name.getText()` yields
+        // the literal `{ alpha, beta }`, which is not a name anything can look
+        // up. One entry per bound identifier instead.
+        for (const name of bindingNames(decl.name)) {
+          decls.push({
+            name,
+            kind: keyword,
+            type,
+            exported: isExported(node),
+            line,
+          });
+        }
       }
     }
   }

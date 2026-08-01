@@ -11,6 +11,7 @@ import ts from "typescript";
 const HERE = path.dirname(url.fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, "fixtures");
 const SHAPES = path.join(FIXTURES, "shapes.ts");
+const BINDINGS = path.join(FIXTURES, "bindings.ts");
 const SIBLING = path.join(FIXTURES, "sibling.ts");
 const DIST = path.join(HERE, "..", "dist", "index.js");
 
@@ -251,6 +252,33 @@ describe("tools over stdio", () => {
     const out = await server.call("call_graph", { path: SHAPES, scope: "package" });
     expect(out).not.toMatch(/ENOTDIR|^Failed/);
     expect(out).toContain("flowchart");
+  });
+
+  it("list_declarations expands destructuring instead of printing the pattern", async () => {
+    const out = await server.call("list_declarations", { path: BINDINGS });
+    expect(out).toContain("alpha");
+    expect(out).toContain("beta");
+    expect(out).toContain("first");
+    expect(out).toContain("second");
+    // The literal pattern text is not a name anything can look up.
+    expect(out).not.toMatch(/\{\s*alpha/);
+  });
+
+  it("diff_ast reports destructured bindings individually", async () => {
+    const out = await server.call("diff_ast", { old_path: SHAPES, new_path: BINDINGS });
+    expect(out).toContain("alpha");
+    expect(out).not.toMatch(/\{\s*alpha/);
+  });
+
+  it("code_smells honours the function scope for any-casts", async () => {
+    const scoped = await server.call("code_smells", { path: BINDINGS, function: "scopedTarget" });
+    // `elsewhere` lives in otherFunction and must not leak into a scoped scan.
+    expect(scoped).not.toContain("elsewhere");
+  });
+
+  it("code_smells without a scope still sees the whole file", async () => {
+    const all = await server.call("code_smells", { path: BINDINGS });
+    expect(all).toMatch(/any|non-null|Non-null/i);
   });
 
   it("get_callers scope=package reaches a sibling file", async () => {
