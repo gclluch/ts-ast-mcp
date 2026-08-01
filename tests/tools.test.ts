@@ -255,6 +255,15 @@ describe("tools over stdio", () => {
     expect(out).toContain("flowchart");
   });
 
+  it("call_graph scope=package does not merge same-named functions across files", async () => {
+    const out = await server.call("call_graph", { path: SHAPES, scope: "package" });
+    // Every node in package scope is qualified by the file that defines it.
+    expect(out).toMatch(/dupname\.ts#register/);
+    expect(out).toMatch(/dupname\.ts#register.*-->.*dupname\.ts#helper/);
+    // The bare, merged form is exactly the bug: an unqualified node id.
+    expect(out).not.toMatch(/^\s+register\["register"\]/m);
+  });
+
   it("code_complexity does not charge a parent for its nested function", async () => {
     const out = await server.call("code_complexity", { path: NESTED });
     // `outer` has no branches of its own; the 5 ifs belong to nestedHelper.

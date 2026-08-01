@@ -145,11 +145,45 @@ function collectPackageCallEdges(
   const allEdges: CallEdge[] = [];
   const allLocalFunctions = new Set<string>();
 
-  for (const file of files) {
+  // Names are only unique within a file. Collect per-file first, then qualify:
+  // merging on the bare name made every `register()` in the package collapse
+  // into one node that appeared to call everything any of them called.
+  const perFile = files.map(file => {
     const sf = parseFile(file);
     const { edges, localFunctions } = collectCallEdges(sf, { ...opts, includeExternal: true });
-    for (const fn of localFunctions) allLocalFunctions.add(fn);
-    allEdges.push(...edges);
+    return { file, edges, localFunctions };
+  });
+
+  // name -> files that define it, used to point a call at the right definition.
+  const definedIn = new Map<string, string[]>();
+  for (const { file, localFunctions } of perFile) {
+    for (const fn of localFunctions) {
+      const entry = definedIn.get(fn);
+      if (entry) entry.push(file); else definedIn.set(fn, [file]);
+    }
+  }
+
+  const qualify = (file: string, name: string) => `${path.basename(file)}#${name}`;
+
+  for (const { file, localFunctions } of perFile) {
+    for (const fn of localFunctions) allLocalFunctions.add(qualify(file, fn));
+  }
+
+  for (const { file, edges, localFunctions } of perFile) {
+    for (const edge of edges) {
+      let callee = edge.callee;
+      if (localFunctions.has(callee)) {
+        // A definition in the same file wins: that is what the call resolves to.
+        callee = qualify(file, callee);
+      } else {
+        const candidates = definedIn.get(callee);
+        // Only qualify when there is exactly one definition package-wide.
+        // Anything ambiguous stays bare rather than inventing a resolution -
+        // this is a syntactic walker, not a type checker.
+        if (candidates && candidates.length === 1) callee = qualify(candidates[0], callee);
+      }
+      allEdges.push({ ...edge, caller: qualify(file, edge.caller), callee });
+    }
   }
 
   // Filter to only local if not including external
@@ -194,7 +228,13 @@ export function register(server: McpServer) {
         : collectCallEdges(parseFile(filePath), { includeExternal: true });
 
       const callers = edges
-        .filter(e => e.callee === targetFunction || e.callee.endsWith(`.${targetFunction}`))
+        // In package scope names carry a `file.ts#` prefix, so match on the
+        // bare name too - a caller should be findable without knowing which
+        // file the callee happens to live in.
+        .filter(e => {
+          const bare = e.callee.includes("#") ? e.callee.slice(e.callee.indexOf("#") + 1) : e.callee;
+          return bare === targetFunction || bare.endsWith(`.${targetFunction}`);
+        })
         .map(e => e.caller);
 
       if (callers.length === 0) return textResult(`No callers found for "${targetFunction}".`);
