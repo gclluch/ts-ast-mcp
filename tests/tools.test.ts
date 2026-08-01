@@ -455,6 +455,73 @@ describe("tools over stdio", () => {
     expect(empty).not.toMatch(/not found/);
   });
 
+  it("get_function_body returns the source and its line range", async () => {
+    const out = await server.call("get_function_body", { path: SHAPES, name: "entry" });
+    expect(out).toContain("entry [Lines 37-39]");
+    expect(out).toContain("return usedHelper(n) + alpha + beta + gamma + delta;");
+  });
+
+  it("get_function_body reaches a function nested inside another", async () => {
+    const out = await server.call("get_function_body", { path: NESTED, name: "nestedHelper" });
+    expect(out).toContain("nestedHelper [Lines 2-5]");
+    expect(out).toMatch(/if \(a\)/);
+  });
+
+  it("get_function_body says so when the name is not there", async () => {
+    const out = await server.call("get_function_body", { path: SHAPES, name: "nope" });
+    expect(out).toMatch(/"nope" not found/);
+  });
+
+  it("get_type_definition distinguishes an interface from an alias", async () => {
+    const iface = await server.call("get_type_definition", { path: SHAPES, name: "Greeter" });
+    expect(iface).toContain("Greeter [Lines 3-5]");
+    expect(iface).toContain("greet(name: string): string;");
+
+    const alias = await server.call("get_type_definition", { path: SHAPES, name: "UnusedShape" });
+    expect(alias).toContain("UnusedShape [Lines 31-31]");
+    expect(alias).toContain("type UnusedShape = { gone: true };");
+  });
+
+  it("list_imports names the binding, the module and the line", async () => {
+    const out = await server.call("list_imports", { path: SIBLING });
+    expect(out.trim()).toBe('[named] { entry } from "./shapes.js" [line 4]');
+  });
+
+  it("find_usages separates a declaration from a call site", async () => {
+    const out = await server.call("find_usages", { path: SHAPES, identifier: "usedHelper" });
+    expect(out).toMatch(/Line 33, Col 10 \[function-declaration\]/);
+    expect(out).toMatch(/Line 38, Col 10 \[call\]/);
+  });
+
+  it("find_usages reports no usages rather than an empty list", async () => {
+    const out = await server.call("find_usages", { path: SHAPES, identifier: "notPresentAnywhere" });
+    expect(out).toMatch(/No usages of "notPresentAnywhere" found/);
+  });
+
+  it("get_doc returns the docstring, and says so when there is none", async () => {
+    const documented = await server.call("get_doc", { path: SHAPES, name: "QuietGreeter" });
+    expect(documented).toContain("Structural match only");
+
+    // `entry` has no JSDoc. Silence here would be indistinguishable from a
+    // lookup that failed.
+    const bare = await server.call("get_doc", { path: SHAPES, name: "entry" });
+    expect(bare).toMatch(/No documentation found for "entry"/);
+  });
+
+  it("analyze_package groups declarations under the file that defines them", async () => {
+    const out = await server.call("analyze_package", { path: FIXTURES });
+    // Sections are per-file; a symbol must appear under its own file, not merged.
+    const shapes = out.slice(out.indexOf("File: shapes.ts"), out.indexOf("File: sibling.ts"));
+    expect(shapes).toMatch(/Greeter \(exported\) \[Lines 3-5\]/);
+    expect(shapes).toMatch(/entry \(exported\) \[Lines 37-39\]/);
+    // usedHelper is unexported and must not be labelled otherwise.
+    expect(shapes).toMatch(/usedHelper \[Lines 33-35\]/);
+    // dupname.ts also declares `helper`; it belongs to its own section.
+    expect(shapes).not.toContain("helper (exported) [Lines 3-3]");
+
+    expect(out).toMatch(/File: sibling\.ts[\s\S]*callsEntry \(exported\)/);
+  });
+
   it("reports a missing file as an error, not a crash", async () => {
     const out = await server.call("analyze_file", { path: "/no/such/file.ts" });
     expect(out).toMatch(/Failed|ENOENT/);
