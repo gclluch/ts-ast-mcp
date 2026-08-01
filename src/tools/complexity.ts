@@ -1,7 +1,8 @@
 import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseFile, getLineRange, isArrowOrFunctionExpr } from "../parse.js";
+import { parseFile, getLineRange } from "../parse.js";
+import { collectFunctionScopes, findScopes, withoutOverloadSignatures } from "../scopes.js";
 import { type ComplexityResult, formatComplexity, textResult, safeTool } from "../format.js";
 
 /** Nodes that own their own complexity score rather than contributing to a parent's. */
@@ -46,70 +47,33 @@ function computeComplexity(node: ts.Node): number {
     ts.forEachChild(n, walk);
   }
 
-  ts.forEachChild(node, walk);
+  // A concise arrow's body IS the expression, so walking only its children
+  // skipped the decision point itself: `(x) => x ? 1 : 2` scored 1, not 2.
+  // A Block is never a decision point, so descending into it is the same walk
+  // - and a body that is itself a function must be descended into too, or
+  // `(a) => (b) => a ? b : 0` is scored by nobody: `walk` bails on a
+  // function-like node, and the returned arrow is not a scope of its own.
+  if (ts.isBlock(node) || isFunctionLike(node)) ts.forEachChild(node, walk);
+  else walk(node);
   return complexity;
 }
 
 function collectComplexity(sourceFile: ts.SourceFile, targetFunction?: string): ComplexityResult[] {
-  const results: ComplexityResult[] = [];
-
-  function processFunction(name: string, body: ts.Node, line: number) {
-    if (targetFunction && name !== targetFunction) return;
-    results.push({ name, complexity: computeComplexity(body), line });
-  }
-
-  // `prefix` builds a dotted path for nested definitions (`outer.helper`), so
-  // two functions with the same short name in one file stay distinguishable -
-  // and it matches the qualified names the Python sibling emits.
-  function visit(node: ts.Node, prefix: string) {
-    if (ts.isFunctionDeclaration(node) && node.name && node.body) {
-      const name = prefix + node.name.getText(sourceFile);
-      const [line] = getLineRange(sourceFile, node);
-      processFunction(name, node.body, line);
-      ts.forEachChild(node.body, child => visit(child, `${name}.`));
-      return;
-    }
-
-    if (ts.isClassDeclaration(node) && node.name) {
-      const className = prefix + node.name.getText(sourceFile);
-      for (const member of node.members) {
-        if (ts.isMethodDeclaration(member) && member.name && member.body) {
-          const methodName = `${className}.${member.name.getText(sourceFile)}`;
-          const [line] = getLineRange(sourceFile, member);
-          processFunction(methodName, member.body, line);
-          ts.forEachChild(member.body, child => visit(child, `${methodName}.`));
-        }
-        if (ts.isConstructorDeclaration(member) && member.body) {
-          const ctorName = `${className}.constructor`;
-          const [line] = getLineRange(sourceFile, member);
-          processFunction(ctorName, member.body, line);
-          ts.forEachChild(member.body, child => visit(child, `${ctorName}.`));
-        }
-      }
-      return;
-    }
-
-    if (ts.isVariableStatement(node)) {
-      for (const decl of node.declarationList.declarations) {
-        if (ts.isVariableDeclaration(decl) && isArrowOrFunctionExpr(decl)) {
-          const name = prefix + decl.name.getText(sourceFile);
-          const init = decl.initializer!;
-          const body = (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) ? (init.body ?? init) : init;
-          const [line] = getLineRange(sourceFile, node);
-          processFunction(name, body, line);
-          ts.forEachChild(body, child => visit(child, `${name}.`));
-        }
-      }
-      return;
-    }
-
-    // Namespaces and plain blocks are not scopes worth naming, but the
-    // functions inside them still are - keep descending.
-    ts.forEachChild(node, child => visit(child, prefix));
-  }
-
-  ts.forEachChild(sourceFile, child => visit(child, ""));
-  return results;
+  // One walker for every construct that owns code, shared with list_functions
+  // and call_graph. Accessors used to be missing here: a getter with a
+  // decision tree in it was simply not scored.
+  const all = withoutOverloadSignatures(collectFunctionScopes(sourceFile))
+    .filter(s => s.body !== undefined);
+  // `findScopes` is the same lookup get_function_body and get_callers use, so
+  // `function: "description"` resolves `BaseCar.description` here too. An
+  // exact-match filter answered "no functions found" for a name the other
+  // tools resolve.
+  return (targetFunction ? findScopes(all, targetFunction) : all)
+    .map(s => ({
+      name: s.name,
+      complexity: computeComplexity(s.body!),
+      line: getLineRange(sourceFile, s.node)[0],
+    }));
 }
 
 export function register(server: McpServer) {

@@ -1,7 +1,13 @@
 import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseFile, getLineRange, isArrowOrFunctionExpr } from "../parse.js";
+import { parseFile, getLineRange } from "../parse.js";
+import {
+  type FunctionScope,
+  collectFunctionScopes,
+  findScopes,
+  withoutOverloadSignatures,
+} from "../scopes.js";
 import { type Smell, formatSmells, textResult, safeTool } from "../format.js";
 
 const LONG_FUNCTION_LINES = 50;
@@ -44,8 +50,8 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
     ts.forEachChild(node, child => descend(child, depth));
   }
 
-  function checkFunction(name: string, node: ts.Node, params: ts.NodeArray<ts.ParameterDeclaration>) {
-    if (targetFunction && name !== targetFunction) return;
+  function checkFunction(scope: FunctionScope) {
+    const { name, node, params } = scope;
     // Remember the matched subtree so the file-wide checks below can be scoped
     // to it too, instead of reporting every `as any` in the file as if it were
     // inside the requested function.
@@ -70,7 +76,10 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
       });
     }
 
-    checkNesting(node, 0, name);
+    // Nest-check the body, not the declaration: a `const f = () => {...}`
+    // scope node is the declarator, whose child IS the arrow, and `descend`
+    // stops at anything function-like - so its nesting was never examined.
+    checkNesting(scope.body ?? node, 0, name);
   }
 
   function checkAnyCasts(node: ts.Node) {
@@ -84,13 +93,16 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
       });
     }
 
-    // `: any` in parameters and variable declarations
+    // `: any` in parameters and variable declarations. Its own category: an
+    // annotation is not a cast, and filing both under `any_cast` meant
+    // filtering by category could not separate "this value was forced" from
+    // "this value was never typed".
     if ((ts.isParameter(node) || ts.isVariableDeclaration(node)) &&
         node.type && node.type.getText(sourceFile) === "any") {
       const [line] = getLineRange(sourceFile, node);
       const name = node.name.getText(sourceFile);
       smells.push({
-        kind: "any_cast",
+        kind: "any_annotation",
         location: `${name} (line ${line})`,
         message: `Explicit "any" type annotation`,
       });
@@ -111,12 +123,20 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
     ts.forEachChild(node, checkNonNullAssertions);
   }
 
-  function visit(node: ts.Node) {
-    if (ts.isFunctionDeclaration(node) && node.name && node.body) {
-      checkFunction(node.name.getText(sourceFile), node, node.parameters);
-    }
+  // The walker shared with list_functions, code_complexity and call_graph.
+  // This tool used to carry its own, which knew nothing of accessors, class
+  // arrow properties or object-literal methods - so `code_smells` scoped to a
+  // getter answered "No code smells found", an all-clear for a function it had
+  // never looked at. That is the same defect already fixed here for nested
+  // functions, and the reason there is now one walk rather than four.
+  const scopes = withoutOverloadSignatures(collectFunctionScopes(sourceFile))
+    .filter(s => s.body !== undefined);
+  for (const scope of targetFunction ? findScopes(scopes, targetFunction) : scopes) {
+    checkFunction(scope);
+  }
 
-    if (ts.isClassDeclaration(node) && node.name) {
+  function visitClasses(node: ts.Node) {
+    if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.name) {
       const className = node.name.getText(sourceFile);
       const methods = node.members.filter(m =>
         ts.isMethodDeclaration(m) || ts.isConstructorDeclaration(m));
@@ -128,37 +148,13 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
           message: `${methods.length} methods exceeds threshold of ${GOD_CLASS_METHODS}`,
         });
       }
-
-      for (const member of node.members) {
-        if (ts.isMethodDeclaration(member) && member.name && member.body) {
-          checkFunction(`${className}.${member.name.getText(sourceFile)}`, member, member.parameters);
-        }
-        if (ts.isConstructorDeclaration(member) && member.body) {
-          checkFunction(`${className}.constructor`, member, member.parameters);
-        }
-      }
     }
-
-    if (ts.isVariableStatement(node)) {
-      for (const decl of node.declarationList.declarations) {
-        if (ts.isVariableDeclaration(decl) && isArrowOrFunctionExpr(decl)) {
-          const init = decl.initializer!;
-          if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
-            checkFunction(decl.name.getText(sourceFile), node, init.parameters);
-          }
-        }
-      }
-    }
-
-    // Descend. Without this only top-level declarations were ever checked: a
-    // function nested in another function was invisible, so its parameter count
-    // and length went unreported, its nesting was attributed to the enclosing
-    // function, and asking for it by name returned "No code smells found" - an
-    // all-clear for a function that had never been looked at.
-    ts.forEachChild(node, visit);
+    ts.forEachChild(node, visitClasses);
   }
 
-  ts.forEachChild(sourceFile, visit);
+  // A god class is a property of the file, not of any one function, so this
+  // stays out of the per-function scan.
+  if (!targetFunction) ts.forEachChild(sourceFile, visitClasses);
 
   // Scope the whole-tree checks to the requested function when there is one.
   // Running them against sourceFile regardless made `function` look like it
@@ -175,7 +171,8 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
 export function register(server: McpServer) {
   server.tool(
     "code_smells",
-    "Detects code smells: long functions, too many parameters, deep nesting, god classes, 'any' casts, non-null assertions",
+    "Detects code smells: long functions, too many parameters, deep nesting, god classes, " +
+      "'as any' casts, explicit 'any' annotations, non-null assertions",
     {
       path: z.string().describe("Absolute path to the TS/JS file"),
       function: z.string().optional().describe("Scope analysis to a specific function"),

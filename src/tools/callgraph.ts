@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseFile, isArrowOrFunctionExpr, listTsFiles } from "../parse.js";
+import { parseFile, listTsFiles } from "../parse.js";
+import { collectFunctionScopes } from "../scopes.js";
 import { textResult, safeTool } from "../format.js";
 
 interface CallEdge {
@@ -15,104 +16,86 @@ function collectCallEdges(
   sourceFile: ts.SourceFile,
   opts: { focusFunction?: string; includeExternal?: boolean },
 ): { edges: CallEdge[]; localFunctions: Set<string> } {
-  const localFunctions = new Set<string>();
+  const scopes = collectFunctionScopes(sourceFile);
+  const scopeNodes = new Set<ts.Node>(scopes.map(s => s.node));
   const edges: CallEdge[] = [];
 
-  // First pass: collect all local function names
-  function collectNames(node: ts.Node) {
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      localFunctions.add(node.name.getText(sourceFile));
-    }
-    if (ts.isClassDeclaration(node) && node.name) {
-      const className = node.name.getText(sourceFile);
-      for (const member of node.members) {
-        if (ts.isMethodDeclaration(member) && member.name) {
-          localFunctions.add(`${className}.${member.name.getText(sourceFile)}`);
-        }
-        if (ts.isConstructorDeclaration(member)) {
-          localFunctions.add(`${className}.constructor`);
-        }
-      }
-    }
-    if (ts.isVariableStatement(node)) {
-      for (const decl of node.declarationList.declarations) {
-        if (ts.isVariableDeclaration(decl) && isArrowOrFunctionExpr(decl)) {
-          localFunctions.add(decl.name.getText(sourceFile));
-        }
-      }
-    }
+  // Every spelling a call site could use for a definition in this file. A
+  // method written `Caller.viaMethod` is called as `this.viaMethod()`, so the
+  // bare segment has to be callable too.
+  // Three sets, because a call site's text means different things depending on
+  // how it is written. Registering every member's bare name as callable made
+  // `rows.map(...)` resolve to a class method called `map`: an edge to
+  // Array.prototype.map, drawn as if it were local.
+  const declared = new Set<string>();   // full dotted names
+  const topLevel = new Set<string>();   // callable unqualified from anywhere
+  const members = new Set<string>();    // reachable as `this.x` / `super.x`
+  for (const s of scopes) {
+    declared.add(s.name);
+    if (!s.name.includes(".")) topLevel.add(s.name);
+    if (s.isMember) members.add(s.name.split(".").pop()!);
   }
 
-  ts.forEachChild(sourceFile, collectNames);
+  /** Does this call site's text name a definition in this file? */
+  const resolves = (callee: string, caller: string): boolean => {
+    if (declared.has(callee)) return true;
+    const dot = callee.lastIndexOf(".");
+    if (dot < 0) {
+      // Unqualified: lexical lookup, innermost scope outwards. The caller's
+      // own body comes first - `viaNested` calling `inner()` means the `inner`
+      // declared inside it - then each enclosing container, so `helper()` in
+      // `Outer.Inner.fn` finds `Outer.helper`, then module scope.
+      let prefix = caller;
+      for (;;) {
+        if (declared.has(`${prefix}.${callee}`)) return true;
+        const cut = prefix.lastIndexOf(".");
+        if (cut < 0) break;
+        prefix = prefix.slice(0, cut);
+      }
+      return topLevel.has(callee);
+    }
+    const receiver = callee.slice(0, dot);
+    return (receiver === "this" || receiver === "super") && members.has(callee.slice(dot + 1));
+  };
 
-  // Second pass: collect call edges
-  function visitBody(body: ts.Node, callerName: string) {
-    function walkCalls(node: ts.Node) {
+  // Package scope resolves a call site's text against this set; it writes the
+  // bare name, so both spellings belong in it.
+  const localFunctions = new Set([...declared, ...topLevel, ...members]);
+
+  for (const scope of scopes) {
+    if (opts.focusFunction && !nameMatches(scope.name, opts.focusFunction)) continue;
+
+    // Stop at any nested definition that owns a scope of its own, or its calls
+    // would be reported against this function as well as against itself.
+    // Anonymous callbacks are not scopes: a call inside one really is made by
+    // the function the callback is written in.
+    const walkCalls = (node: ts.Node) => {
+      if (node !== scope.node && scopeNodes.has(node)) return;
       if (ts.isCallExpression(node)) {
         const expr = node.expression;
-        let callee: string;
-
-        if (ts.isIdentifier(expr)) {
-          callee = expr.getText(sourceFile);
-        } else if (ts.isPropertyAccessExpression(expr)) {
-          callee = expr.getText(sourceFile);
-        } else {
-          callee = "<dynamic>";
-        }
-
+        const callee = ts.isIdentifier(expr) || ts.isPropertyAccessExpression(expr)
+          ? expr.getText(sourceFile)
+          : "<dynamic>";
         if (callee !== "<dynamic>") {
-          const isLocal = localFunctions.has(callee) ||
-            localFunctions.has(callee.split(".").pop()!);
-          if (isLocal || opts.includeExternal) {
-            edges.push({ caller: callerName, callee });
+          if (resolves(callee, scope.name) || opts.includeExternal) {
+            edges.push({ caller: scope.name, callee });
           }
         }
       }
       ts.forEachChild(node, walkCalls);
-    }
-    ts.forEachChild(body, walkCalls);
+    };
+    // Start at the body, not the declaration: a decorator and a parameter
+    // default are attached to the declaration but are not calls this function
+    // makes - `@Log() method() {}` was reporting an edge method --> Log.
+    walkCalls(scope.body ?? scope.node);
   }
-
-  function extractCalls(node: ts.Node) {
-    if (ts.isFunctionDeclaration(node) && node.name && node.body) {
-      const name = node.name.getText(sourceFile);
-      if (!opts.focusFunction || name === opts.focusFunction) {
-        visitBody(node.body, name);
-      }
-    }
-    if (ts.isClassDeclaration(node) && node.name) {
-      const className = node.name.getText(sourceFile);
-      for (const member of node.members) {
-        if (ts.isMethodDeclaration(member) && member.name && member.body) {
-          const methodName = `${className}.${member.name.getText(sourceFile)}`;
-          if (!opts.focusFunction || methodName === opts.focusFunction ||
-              member.name.getText(sourceFile) === opts.focusFunction) {
-            visitBody(member.body, methodName);
-          }
-        }
-        if (ts.isConstructorDeclaration(member) && member.body) {
-          const ctorName = `${className}.constructor`;
-          if (!opts.focusFunction || ctorName === opts.focusFunction) {
-            visitBody(member.body, ctorName);
-          }
-        }
-      }
-    }
-    if (ts.isVariableStatement(node)) {
-      for (const decl of node.declarationList.declarations) {
-        if (ts.isVariableDeclaration(decl) && isArrowOrFunctionExpr(decl)) {
-          const name = decl.name.getText(sourceFile);
-          if (!opts.focusFunction || name === opts.focusFunction) {
-            visitBody(decl.initializer!, name);
-          }
-        }
-      }
-    }
-  }
-
-  ts.forEachChild(sourceFile, extractCalls);
 
   return { edges, localFunctions };
+}
+
+/** `Class.method` also answers to `method`, and `method` to itself. */
+function nameMatches(scopeName: string, target: string): boolean {
+  return scopeName === target || scopeName.endsWith(`.${target}`);
 }
 
 function toMermaid(edges: CallEdge[], direction: string): string {
