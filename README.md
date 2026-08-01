@@ -61,6 +61,8 @@ Companion to [py-ast-mcp](https://github.com/gclluch/py-ast-mcp), the same idea 
 | `code_complexity` | Cyclomatic complexity per function | `path`, `function`\* |
 | `code_smells` | Long functions, deep nesting, god classes, `any` casts, non-null assertions | `path`, `function`\* |
 | `find_errors` | Floating promises, empty catches, double type assertions, optional chain + non-null | `path`, `function`\* |
+
+A floating promise here means a discarded call to a function the **same file** declares `async` (or to `fetch`). Without type resolution that is the limit of what can be claimed soundly - an imported `async` function is not detected. It under-reports on purpose: the alternative is guessing from the callee's name, which reports `map.get(k)`.
 | `dead_code` | Find unexported symbols never referenced inside their own file | `path` (directory), `include_tests`\* |
 | `find_implementations` | Find classes satisfying an interface - explicit `implements` or type-checked structural match (**semantic tier**) | `path`, `interface` |
 

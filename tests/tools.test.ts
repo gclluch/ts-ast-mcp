@@ -15,6 +15,8 @@ const BINDINGS = path.join(FIXTURES, "bindings.ts");
 const NESTED = path.join(FIXTURES, "nested.ts");
 const SIBLING = path.join(FIXTURES, "sibling.ts");
 const IMPLS = path.join(FIXTURES, "impls.ts");
+const NESTED_SMELLS = path.join(FIXTURES, "nested.smells.ts");
+const PROMISES = path.join(FIXTURES, "promises.ts");
 const DIST = path.join(HERE, "..", "dist", "index.js");
 
 // ── unit: the two root causes behind the bugs this suite guards ──────────
@@ -365,6 +367,43 @@ describe("tools over stdio", () => {
   it("dead_code does not report a symbol used only within its own file", async () => {
     const out = await server.call("dead_code", { path: FIXTURES });
     expect(out).not.toMatch(/\busedHelper\b/);
+  });
+
+  // Only top-level declarations were visited, so a function nested inside
+  // another was never checked at all.
+  it("code_smells sees a function nested inside another function", async () => {
+    const out = await server.call("code_smells", { path: NESTED_SMELLS });
+    expect(out).toMatch(/too_many_parameters.*innerSmelly/);
+  });
+
+  it("code_smells attributes nesting to the function it is in", async () => {
+    const out = await server.call("code_smells", { path: NESTED_SMELLS });
+    expect(out).toMatch(/deep_nesting.*innerSmelly/);
+    expect(out).not.toMatch(/deep_nesting.*outerWrapper/);
+  });
+
+  it("code_smells scoped to a nested function does not return a false all-clear", async () => {
+    const out = await server.call("code_smells", { path: NESTED_SMELLS, function: "innerSmelly" });
+    expect(out).not.toMatch(/No code smells found/);
+    expect(out).toContain("too_many_parameters");
+  });
+
+  // The callee's name was matched against a verb list containing get/delete,
+  // so ordinary Map calls were reported and real discarded promises were not.
+  it("find_errors does not report a sync call whose name looks async", async () => {
+    const out = await server.call("find_errors", { path: PROMISES });
+    expect(out).not.toContain("cache.get");
+    expect(out).not.toContain("cache.delete");
+  });
+
+  it("find_errors reports a discarded call to a locally-declared async function", async () => {
+    const out = await server.call("find_errors", { path: PROMISES });
+    // Assert the finding, not the count: the old verb-list version happened to
+    // produce two findings here as well, just both of them wrong.
+    const floating = out.split("\n").filter(l => l.includes("floating_promise"));
+    expect(floating).toHaveLength(2);
+    // Both the async and the sync caller discard it; the awaited one does not count.
+    expect(floating.every(l => l.includes("saveUser()"))).toBe(true);
   });
 
   it("list_exports expands a destructured export", async () => {

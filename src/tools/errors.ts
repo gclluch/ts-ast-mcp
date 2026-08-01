@@ -4,8 +4,42 @@ import { z } from "zod";
 import { parseFile, getLineRange } from "../parse.js";
 import { type ErrorFinding, formatErrors, textResult, safeTool } from "../format.js";
 
+/**
+ * Names of functions this file declares `async`.
+ *
+ * A syntactic tool cannot know a call's return type, so the previous version
+ * guessed from the callee's *name* against a verb list
+ * (get/send/update/delete/save/...). Those are ordinary method names: it
+ * reported `map.get(k)` and `map.delete(k)` as unhandled promises while missing
+ * a real `saveUser()`, because the list matched whole names only. Resolving the
+ * callee to an `async` declaration in the same file is narrower - it says
+ * nothing about imported functions - but it does not invent findings.
+ */
+function collectAsyncNames(sourceFile: ts.SourceFile): Set<string> {
+  const names = new Set<string>();
+
+  function visit(node: ts.Node) {
+    if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) &&
+        node.name && hasAsyncModifier(node)) {
+      names.add(node.name.getText(sourceFile));
+    }
+    // `const f = async () => {}` carries the modifier on the initializer, not
+    // on the declaration that names it.
+    if (ts.isVariableDeclaration(node) && node.initializer &&
+        (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)) &&
+        hasAsyncModifier(node.initializer)) {
+      names.add(node.name.getText(sourceFile));
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  ts.forEachChild(sourceFile, visit);
+  return names;
+}
+
 function detectErrors(sourceFile: ts.SourceFile, targetFunction?: string): ErrorFinding[] {
   const errors: ErrorFinding[] = [];
+  const asyncNames = collectAsyncNames(sourceFile);
 
   function isInsideFunction(node: ts.Node, funcName?: string): boolean {
     if (!funcName) return true;
@@ -38,29 +72,24 @@ function detectErrors(sourceFile: ts.SourceFile, targetFunction?: string): Error
       }
     }
 
-    // Floating promises (expression statements that are call expressions returning promise-like)
+    // Floating promises: a call statement whose result is discarded, where the
+    // callee is a function this file declares `async`.
+    //
+    // An awaited call is an AwaitExpression, not a CallExpression, so anything
+    // reaching here already discards its value - there is no separate "is it
+    // awaited" test to make.
     if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)) {
-      const callText = node.expression.expression.getText(sourceFile);
-      // Heuristic: async-looking call without await
-      if (ts.isAwaitExpression(node.expression)) {
-        // It's awaited, fine
-      } else {
-        // Check parent - if we're in an async function, flag unhandled call expressions
-        // that look like they return promises (fetch, async methods)
-        const parent = findParentFunction(node);
-        if (parent && hasAsyncModifier(parent)) {
-          // Only flag calls that look like promise-returning
-          const callName = callText.split(".").pop() ?? callText;
-          const asyncPatterns = /^(fetch|then|catch|finally|save|create|update|delete|remove|send|post|get|put|patch)$/i;
-          if (asyncPatterns.test(callName) || callText.endsWith("Async")) {
-            const [line] = getLineRange(sourceFile, node);
-            errors.push({
-              kind: "floating_promise",
-              location: `line ${line}`,
-              message: `Potentially unhandled promise: ${node.getText(sourceFile).substring(0, 80)}`,
-            });
-          }
-        }
+      const callee = node.expression.expression;
+      const callName = ts.isPropertyAccessExpression(callee)
+        ? callee.name.getText(sourceFile)
+        : callee.getText(sourceFile);
+      if (asyncNames.has(callName) || callName === "fetch") {
+        const [line] = getLineRange(sourceFile, node);
+        errors.push({
+          kind: "floating_promise",
+          location: `line ${line}`,
+          message: `Unhandled promise: ${node.getText(sourceFile).substring(0, 80)}`,
+        });
       }
     }
 
@@ -95,18 +124,6 @@ function detectErrors(sourceFile: ts.SourceFile, targetFunction?: string): Error
 
   ts.forEachChild(sourceFile, visit);
   return errors;
-}
-
-function findParentFunction(node: ts.Node): ts.Node | undefined {
-  let current = node.parent;
-  while (current) {
-    if (ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current) ||
-        ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
-      return current;
-    }
-    current = current.parent;
-  }
-  return undefined;
 }
 
 function hasAsyncModifier(node: ts.Node): boolean {
