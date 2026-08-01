@@ -1,13 +1,13 @@
 # TypeScript AST MCP Server
 
-A Model Context Protocol (MCP) server for deep structural analysis of TypeScript and JavaScript source code. Unlike text-based search, this server uses the TypeScript Compiler API (`ts.createSourceFile`, `ts.createProgram`) to understand the actual structure of your code - types, functions, call relationships, interface satisfaction, and more.
+A Model Context Protocol (MCP) server for deep structural analysis of TypeScript and JavaScript source code. Unlike text-based search, this server parses your code with the TypeScript Compiler API (`ts.createSourceFile`) and walks the real AST - types, functions, call relationships, interface satisfaction, and more.
 
-Part of a family of AST analysis MCP servers, alongside a Go and Python counterpart.
+Companion to [py-ast-mcp](https://github.com/gclluch/py-ast-mcp), the same idea applied to Python; a Go AST MCP server by another author served as prior art for this one.
 
 ## Features
 
 - **20 analysis tools** covering file-level, directory-level, and cross-file structural queries
-- **Two-tier parsing** - fast syntactic analysis (<5ms) for most tools, semantic analysis with type checker for cross-file queries
+- **Fast syntactic parsing** - `ts.createSourceFile()` per file, under 5ms; cross-file tools re-parse in scope, so results always reflect the latest edit
 - **Arrow function awareness** - `const foo = () => {}` treated as first-class functions throughout
 - **Full signature extraction** with parameter types, return types, and class-qualified names
 - **Call graph generation** with Mermaid diagrams, forward and reverse traversal, file or package scope
@@ -170,7 +170,9 @@ Then point your `.mcp.json` at the local build:
 
 Most tools use the **syntactic tier** - `ts.createSourceFile()` parses a single file in under 5ms. No tsconfig or type checker needed.
 
-Tools that operate across files (`dead_code`, `find_implementations`, `analyze_package`) and tools with `scope: "package"` (`call_graph`, `get_callers`) use the **semantic tier** - `ts.createProgram()` loads from the nearest tsconfig for cross-file analysis. The program is cached by tsconfig path + mtime, so repeated calls are fast.
+Tools that operate across files (`dead_code`, `find_implementations`, `analyze_package`) and tools with `scope: "package"` (`call_graph`, `get_callers`) currently do this by re-parsing every file in scope on each call via the syntactic parser - always correct on the latest edit, at the cost of re-parsing repeatedly.
+
+A **semantic tier** exists but is not yet wired to any tool: `loadProgram()` (in `src/parse.ts`) builds a cached, type-checker-backed `ts.Program`, keyed by tsconfig path (or the target directory, when there's no tsconfig). It invalidates whenever the tsconfig's mtime changes *or* the mtime of any file that fed the program changes - so a source edit is always reflected on the next call, and an unchanged tree reuses the same `Program` instead of rebuilding it. It's the intended foundation for true type-aware queries (resolving a symbol to its declaration across files, structural type comparison); until a tool calls it, everything above is syntactic.
 
 Arrow functions (`const foo = () => {}`) are detected as first-class functions throughout - they appear in `list_functions`, `get_function_body`, `code_complexity`, `code_smells`, and all other function-aware tools.
 

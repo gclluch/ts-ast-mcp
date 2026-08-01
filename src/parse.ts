@@ -39,48 +39,86 @@ function getScriptKind(filePath: string): ts.ScriptKind {
 }
 
 // ── Semantic (slower, cached) ──────────────────────────────────────────
+//
+// Cache key is the tsconfig path, or the directory itself when there is no
+// tsconfig. A cache entry is valid only while BOTH hold:
+//   - the tsconfig's mtime is unchanged (irrelevant when there is none)
+//   - every file that fed the program still has the mtime it had when built
+// Recomputing the candidate file list + stat'ing it is cheap (a directory
+// walk or a config glob); it's `ts.createProgram`'s parse+bind+check pass
+// that's expensive, and that only re-runs when something actually changed.
 
 interface ProgramCache {
   program: ts.Program;
-  configMtime: number;
-  configPath: string;
+  configMtime: number | undefined;
+  fileMtimes: Map<string, number>;
 }
 
 const programCache = new Map<string, ProgramCache>();
 
+const DEFAULT_COMPILER_OPTIONS: ts.CompilerOptions = {
+  target: ts.ScriptTarget.Latest,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  jsx: ts.JsxEmit.ReactJSX,
+  strict: true,
+  allowJs: true,
+};
+
+function statMtimes(files: string[]): Map<string, number> {
+  const mtimes = new Map<string, number>();
+  for (const file of files) {
+    try {
+      mtimes.set(file, fs.statSync(file).mtimeMs);
+    } catch {
+      // Vanished between listing and stat - leave it out so a size/identity
+      // mismatch against the cached snapshot forces a rebuild.
+    }
+  }
+  return mtimes;
+}
+
+function mtimesMatch(a: Map<string, number>, b: Map<string, number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [file, mtime] of a) {
+    if (b.get(file) !== mtime) return false;
+  }
+  return true;
+}
+
 export function loadProgram(dir: string): ts.Program {
   const absDir = path.resolve(dir);
   const configPath = ts.findConfigFile(absDir, ts.sys.fileExists, "tsconfig.json");
+  const cacheKey = configPath ?? absDir;
+
+  let fileNames: string[];
+  let options: ts.CompilerOptions;
+  let configMtime: number | undefined;
 
   if (configPath) {
-    const stat = fs.statSync(configPath);
-    const mtime = stat.mtimeMs;
-    const cached = programCache.get(configPath);
-    if (cached && cached.configMtime === mtime) {
-      return cached.program;
-    }
-
+    configMtime = fs.statSync(configPath).mtimeMs;
     const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
     const parsed = ts.parseJsonConfigFileContent(
       configFile.config,
       ts.sys,
       path.dirname(configPath),
     );
-    const program = ts.createProgram(parsed.fileNames, parsed.options);
-    programCache.set(configPath, { program, configMtime: mtime, configPath });
-    return program;
+    fileNames = parsed.fileNames;
+    options = parsed.options;
+  } else {
+    // No tsconfig - build from every TS/JS file in the directory.
+    fileNames = collectTsFiles(absDir);
+    options = DEFAULT_COMPILER_OPTIONS;
   }
 
-  // No tsconfig - create a program from all TS files in the directory
-  const files = collectTsFiles(absDir);
-  const program = ts.createProgram(files, {
-    target: ts.ScriptTarget.Latest,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    jsx: ts.JsxEmit.ReactJSX,
-    strict: true,
-    allowJs: true,
-  });
+  const fileMtimes = statMtimes(fileNames);
+  const cached = programCache.get(cacheKey);
+  if (cached && cached.configMtime === configMtime && mtimesMatch(cached.fileMtimes, fileMtimes)) {
+    return cached.program;
+  }
+
+  const program = ts.createProgram(fileNames, options);
+  programCache.set(cacheKey, { program, configMtime, fileMtimes });
   return program;
 }
 

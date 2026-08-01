@@ -1,8 +1,10 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import url from "node:url";
-import { listTsFiles, bindingNames } from "../src/parse.js";
+import fs from "node:fs";
+import os from "node:os";
+import { listTsFiles, bindingNames, loadProgram } from "../src/parse.js";
 import { parseSource } from "../src/parse.js";
 import ts from "typescript";
 
@@ -58,6 +60,84 @@ describe("bindingNames", () => {
   it("expands nested and renamed bindings", () => {
     expect(bindingNames(firstDecl("const { a: { b }, c: renamed } = x;")))
       .toEqual(["b", "renamed"]);
+  });
+});
+
+describe("loadProgram", () => {
+  const tmpDirs: string[] = [];
+
+  const mkTmpDir = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ts-ast-mcp-loadprogram-"));
+    tmpDirs.push(dir);
+    return dir;
+  };
+
+  // Filesystem mtime resolution varies (some are 1s granularity); bump the
+  // mtime explicitly into the future so the change is always detectable,
+  // rather than depending on real wall-clock elapsed time between writes.
+  const writeAndBumpMtime = (file: string, content: string, aheadMs: number) => {
+    fs.writeFileSync(file, content);
+    const future = new Date(Date.now() + aheadMs);
+    fs.utimesSync(file, future, future);
+  };
+
+  afterEach(() => {
+    while (tmpDirs.length) {
+      fs.rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses the cached Program when nothing changed", () => {
+    const dir = mkTmpDir();
+    fs.writeFileSync(path.join(dir, "tsconfig.json"), JSON.stringify({ include: ["**/*"] }));
+    fs.writeFileSync(path.join(dir, "a.ts"), "export const value = 1;\n");
+
+    const first = loadProgram(dir);
+    const second = loadProgram(dir);
+    expect(second).toBe(first);
+  });
+
+  it("picks up a source file edit (tsconfig project)", () => {
+    const dir = mkTmpDir();
+    const file = path.join(dir, "a.ts");
+    fs.writeFileSync(path.join(dir, "tsconfig.json"), JSON.stringify({ include: ["**/*"] }));
+    fs.writeFileSync(file, "export const value = 1;\n");
+
+    const before = loadProgram(dir);
+    expect(before.getSourceFile(file)!.text).toContain("value = 1");
+
+    writeAndBumpMtime(file, "export const value = 2;\n", 5000);
+
+    const after = loadProgram(dir);
+    expect(after).not.toBe(before);
+    expect(after.getSourceFile(file)!.text).toContain("value = 2");
+  });
+
+  it("reuses the cached Program when nothing changed (no tsconfig)", () => {
+    // The no-tsconfig branch previously had no cache at all: every call ran
+    // collectTsFiles + ts.createProgram from scratch, so this identity check
+    // fails against the old code even with zero file changes.
+    const dir = mkTmpDir();
+    fs.writeFileSync(path.join(dir, "a.ts"), "export const value = 1;\n");
+
+    const first = loadProgram(dir);
+    const second = loadProgram(dir);
+    expect(second).toBe(first);
+  });
+
+  it("picks up a source file edit (no tsconfig)", () => {
+    const dir = mkTmpDir();
+    const file = path.join(dir, "a.ts");
+    fs.writeFileSync(file, "export const value = 1;\n");
+
+    const before = loadProgram(dir);
+    expect(before.getSourceFile(file)!.text).toContain("value = 1");
+
+    writeAndBumpMtime(file, "export const value = 2;\n", 5000);
+
+    const after = loadProgram(dir);
+    expect(after).not.toBe(before);
+    expect(after.getSourceFile(file)!.text).toContain("value = 2");
   });
 });
 
