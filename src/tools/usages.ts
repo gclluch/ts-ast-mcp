@@ -1,7 +1,9 @@
 import ts from "typescript";
+import fs from "node:fs";
+import path from "node:path";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseFile, getLineRange } from "../parse.js";
+import { parseFile, getLineRange, listTsFiles } from "../parse.js";
 import { textResult, safeTool } from "../format.js";
 
 interface UsageInfo {
@@ -98,19 +100,42 @@ function findNodeAtPosition(sourceFile: ts.SourceFile, line: number, column: num
 export function register(server: McpServer) {
   server.tool(
     "find_usages",
-    "Finds all occurrences of a specific identifier (variable, function, type) within a file",
+    "Finds all occurrences of an identifier (variable, function, type) in a file, or " +
+      "across a directory with scope='package'. Matches on identifier text, not on " +
+      "resolved symbol: two unrelated declarations sharing a name both match.",
     {
-      path: z.string().describe("Absolute path to the TS/JS file"),
+      path: z.string().describe("Absolute path to a TS/JS file, or a directory"),
       identifier: z.string().describe("The name of the identifier to search for"),
+      scope: z.enum(["file", "package"]).optional().default("file")
+        .describe("Analysis scope: 'file' or 'package' (the containing directory, recursively)"),
     },
-    safeTool("find usages", ({ path: filePath, identifier }) => {
-      const sf = parseFile(filePath);
-      const usages = findUsages(sf, identifier);
-      if (usages.length === 0) return textResult(`No usages of "${identifier}" found in ${filePath}.`);
+    safeTool("find usages", ({ path: filePath, identifier, scope }) => {
+      // A directory used to reach readFileSync and fail with a raw EISDIR, and
+      // `scope` was accepted and silently ignored - get_callers had supported
+      // package scope all along, so the two tools disagreed on the same input.
+      const abs = path.resolve(filePath);
+      // Package scope on a path that does not exist would otherwise fall back
+      // to searching its parent directory, so a typo returns confident hits
+      // from somewhere the caller never named.
+      if (!fs.existsSync(abs)) throw new Error(`ENOENT: no such file or directory, ${abs}`);
+      const isDir = fs.statSync(abs).isDirectory();
+      const perFile = isDir || scope === "package";
+      const files = perFile ? listTsFiles(isDir ? abs : path.dirname(abs), true) : [abs];
 
-      const lines: string[] = [`Usages of "${identifier}" in ${filePath} (${usages.length} found):`, ""];
-      for (const u of usages) {
-        lines.push(`  Line ${u.line}, Col ${u.column} [${u.kind}]: ${u.context}`);
+      const found = files
+        .map(file => ({ file, usages: findUsages(parseFile(file), identifier) }))
+        .filter(r => r.usages.length > 0);
+      const total = found.reduce((n, r) => n + r.usages.length, 0);
+      if (total === 0) return textResult(`No usages of "${identifier}" found in ${filePath}.`);
+
+      const lines = [`Usages of "${identifier}" in ${filePath} (${total} found):`, ""];
+      for (const { file, usages } of found) {
+        // Gate on the scope, not the file count: a directory holding exactly
+        // one TS file was printing bare line numbers with no filename.
+        if (perFile) lines.push(`  ${path.relative(isDir ? abs : path.dirname(abs), file)}:`);
+        for (const u of usages) {
+          lines.push(`  Line ${u.line}, Col ${u.column} [${u.kind}]: ${u.context}`);
+        }
       }
       return textResult(lines.join("\n"));
     }),
