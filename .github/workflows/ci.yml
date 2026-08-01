@@ -38,7 +38,8 @@ jobs:
       # that does not exist. Assert the built entry ships rather than trusting
       # the `files` field to stay correct.
       - name: entry point is in the tarball
-        run: npm pack --dry-run --json | grep -q '"path": "dist/index.js"'
+        # Quoted: the ": " inside the grep pattern is a mapping indicator to YAML.
+        run: 'npm pack --dry-run --json | grep -q ''"path": "dist/index.js"'''
       - name: packaged server answers over stdio
         run: |
           npm pack --pack-destination /tmp
