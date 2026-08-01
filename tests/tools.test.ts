@@ -17,6 +17,8 @@ const SIBLING = path.join(FIXTURES, "sibling.ts");
 const IMPLS = path.join(FIXTURES, "impls.ts");
 const NESTED_SMELLS = path.join(FIXTURES, "nested.smells.ts");
 const PROMISES = path.join(FIXTURES, "promises.ts");
+const KITCHEN = path.join(FIXTURES, "kitchen.ts");
+const CALLERS = path.join(FIXTURES, "callers.ts");
 const DIST = path.join(HERE, "..", "dist", "index.js");
 
 // ── unit: the two root causes behind the bugs this suite guards ──────────
@@ -378,8 +380,10 @@ describe("tools over stdio", () => {
 
   it("code_smells attributes nesting to the function it is in", async () => {
     const out = await server.call("code_smells", { path: NESTED_SMELLS });
-    expect(out).toMatch(/deep_nesting.*innerSmelly/);
-    expect(out).not.toMatch(/deep_nesting.*outerWrapper/);
+    expect(out).toMatch(/deep_nesting\] outerWrapper\.innerSmelly \(/);
+    // The bug was attributing the child's nesting to the parent. Names are
+    // qualified now, so match the parent standing alone, not as a prefix.
+    expect(out).not.toMatch(/deep_nesting\] outerWrapper \(/);
   });
 
   it("code_smells scoped to a nested function does not return a false all-clear", async () => {
@@ -520,6 +524,284 @@ describe("tools over stdio", () => {
     expect(shapes).not.toContain("helper (exported) [Lines 3-3]");
 
     expect(out).toMatch(/File: sibling\.ts[\s\S]*callsEntry \(exported\)/);
+  });
+
+  // ── the 2026-08-01 audit ──────────────────────────────────────────────
+  //
+  // callers.ts declares every way one function can call another; kitchen.ts
+  // declares every construct a tool was found blind to. Both were scratch
+  // files during the audit, which is why these defects survived a green suite.
+
+  // P1: three walkers each knew a different subset of the language, so
+  // accessors, class arrow properties, namespace bodies and object-literal
+  // methods were invisible and nested callers were folded into their parent.
+  it("get_callers finds every caller, whatever shape it is written in", async () => {
+    const out = await server.call("get_callers", { path: CALLERS, function: "target" });
+    for (const caller of [
+      "Caller.viaMethod", "Caller.viaStatic", "Caller.viaGetter", "Caller.viaSetter",
+      "Caller.viaArrowProp", "Caller.constructor", "viaArrowConst",
+      "Ns.viaNamespace", "obj.viaObjectMethod", "obj.viaObjectArrow",
+    ]) {
+      expect(out).toContain(caller);
+    }
+    expect(out).toMatch(/\(11 found\)/);
+  });
+
+  it("get_callers attributes a nested caller to itself, not to its parent", async () => {
+    const out = await server.call("get_callers", { path: CALLERS, function: "target" });
+    // `inner` calls target; `viaNested` only calls `inner`.
+    expect(out).toContain("viaNested.inner");
+    expect(out).not.toMatch(/^\s+viaNested$/m);
+  });
+
+  it("get_callers does not report a function that only mentions the name", async () => {
+    const out = await server.call("get_callers", { path: CALLERS, function: "target" });
+    expect(out).not.toContain("mentionsOnly");
+  });
+
+  it("call_graph gives a nested caller its own node", async () => {
+    const out = await server.call("call_graph", { path: CALLERS });
+    expect(out).toMatch(/viaNested_inner\["viaNested\.inner"\] --> target/);
+    expect(out).toMatch(/viaNested\["viaNested"\] --> inner/);
+  });
+
+  // P1: a getter with logic in it is a function by every meaningful
+  // definition, and it was missing from every tool that lists functions.
+  it("list_functions reports accessors, marked get and set", async () => {
+    const out = await server.call("list_functions", { path: KITCHEN });
+    expect(out).toMatch(/get BaseCar\.description\(\): string/);
+    expect(out).toMatch(/set BaseCar\.odometer\(value: number\)/);
+  });
+
+  it("code_complexity scores accessors", async () => {
+    const out = await server.call("code_complexity", { path: KITCHEN });
+    expect(out).toMatch(/BaseCar\.description \(line 22\): 2/);
+    expect(out).toMatch(/BaseCar\.odometer \(line 29\): 2/);
+  });
+
+  it("get_function_body reaches an accessor", async () => {
+    const out = await server.call("get_function_body", { path: KITCHEN, name: "BaseCar.description" });
+    expect(out).not.toMatch(/not found/);
+    expect(out).toContain("get description(): string");
+  });
+
+  // P1: taking the first name match returned a declaration with no body from
+  // a tool named get *function body*.
+  it("get_function_body returns the implementation, not an overload signature", async () => {
+    const out = await server.call("get_function_body", { path: KITCHEN, name: "parse" });
+    expect(out).toContain("input: string | number | boolean");
+    expect(out).toContain("return input ? 1 : 0;");
+    expect(out).not.toMatch(/parse\(input: string\): number;/);
+  });
+
+  // P2: one exported symbol named `parse`, not four.
+  it("an overloaded function is one symbol, not one per signature", async () => {
+    for (const tool of ["list_exports", "list_functions", "analyze_file"]) {
+      const out = await server.call(tool, { path: KITCHEN });
+      const hits = out.split("\n").filter(l => /\bparse\b/.test(l));
+      expect(hits, `${tool} listed parse ${hits.length} times`).toHaveLength(1);
+    }
+  });
+
+  // P2: `export namespace Outer` was absent from both tools entirely, and its
+  // members were listed bare - two namespaces exporting the same name were
+  // indistinguishable.
+  it("namespaces are listed, and their members are qualified", async () => {
+    const exports = await server.call("list_exports", { path: KITCHEN });
+    expect(exports).toMatch(/Outer \[namespace\]/);
+
+    const analyzed = await server.call("analyze_file", { path: KITCHEN });
+    expect(analyzed).toMatch(/Namespaces:/);
+    expect(analyzed).toContain("Outer.Inner");
+    expect(analyzed).toContain("Outer.Inner.deeplyNested");
+    expect(analyzed).not.toMatch(/^\s+deeplyNested/m);
+  });
+
+  // P2: `stop?(): void` rendered as required.
+  it("list_methods keeps the optional marker on an interface member", async () => {
+    const out = await server.call("list_methods", { path: KITCHEN, type: "Vehicle" });
+    expect(out).toContain("Vehicle.stop?(): void");
+    expect(out).toContain("Vehicle.start(): void");
+  });
+
+  // P2: the class's export modifier was propagated to every member, so
+  // `private Sedan.secret(): void (exported)` contradicted itself.
+  it("a private or protected member of an exported class is not exported", async () => {
+    const out = await server.call("list_functions", { path: KITCHEN });
+    expect(out).toMatch(/private Sedan\.secret\(\): void \[/);
+    expect(out).toMatch(/protected BaseCar\.service\(\): void \[/);
+    // A public member of an exported class still is.
+    expect(out).toMatch(/BaseCar\.start\(\): void \(exported\)/);
+  });
+
+  // P2: `BaseCar.build()` and `instance.build()` rendered identically.
+  it("static members are marked", async () => {
+    const out = await server.call("list_functions", { path: KITCHEN });
+    expect(out).toMatch(/static BaseCar\.build/);
+  });
+
+  // P3: an annotation is not a cast; one category could not tell them apart.
+  it("code_smells looks inside an accessor instead of clearing it unseen", async () => {
+    // It carried its own walker, which had never heard of accessors, so any
+    // getter answered "No code smells found" - an all-clear for a function it
+    // never opened. The fixture's getter is deliberately deeply nested.
+    const getter = await server.call("code_smells", { path: KITCHEN, function: "SmellyAccessor.worst" });
+    expect(getter).not.toMatch(/No code smells found/);
+    expect(getter).toMatch(/deep_nesting\] SmellyAccessor\.worst/);
+
+    const setter = await server.call("code_smells", { path: KITCHEN, function: "SmellyAccessor.widen" });
+    expect(setter).toMatch(/any_annotation\] value/);
+    // ...and the scoping still holds: nothing from elsewhere in the file.
+    expect(setter).not.toMatch(/withAnnotations|forced/);
+  });
+
+  it("code_smells separates an any annotation from an as-any cast", async () => {
+    const out = await server.call("code_smells", { path: KITCHEN });
+    expect(out).toMatch(/\[any_annotation\] a \(line 104\)/);
+    expect(out).toMatch(/\[any_cast\].*as any/);
+  });
+
+  // P3: only top-level declarations were ever considered.
+  it("dead_code reports an unreferenced private member", async () => {
+    const out = await server.call("dead_code", { path: FIXTURES });
+    expect(out).toMatch(/private method Sedan\.secret/);
+    expect(out).toMatch(/private field BaseCar\.#vin/);
+  });
+
+  it("dead_code spares a private member that is used", async () => {
+    const out = await server.call("dead_code", { path: FIXTURES });
+    // `serviceDue` is protected and read in `description`; `start` is public.
+    expect(out).not.toMatch(/serviceDue/);
+    expect(out).not.toMatch(/BaseCar\.start/);
+  });
+
+  // P3: right answer, wrong reason - Sedan inherits an explicit `implements`
+  // from BaseCar, so "structural" claimed a rename would not break it.
+  it("find_implementations distinguishes inherited from structural", async () => {
+    const out = await server.call("find_implementations", { path: KITCHEN, interface: "Vehicle" });
+    expect(out).toMatch(/Sedan \(inherited\)/);
+    expect(out).not.toMatch(/Sedan \(structural\)/);
+  });
+
+  it("find_implementations marks an abstract class as abstract", async () => {
+    const out = await server.call("find_implementations", { path: KITCHEN, interface: "Vehicle" });
+    expect(out).toMatch(/BaseCar \(abstract, explicit\)/);
+  });
+
+  // P3: `scope` was accepted and silently ignored, and a directory returned a
+  // raw EISDIR - while get_callers had supported package scope all along.
+  it("find_usages honours package scope", async () => {
+    const out = await server.call("find_usages", { path: SHAPES, identifier: "entry", scope: "package" });
+    expect(out).not.toMatch(/EISDIR|^Failed/);
+    expect(out).toContain("sibling.ts");
+  });
+
+  it("find_usages accepts a directory instead of failing with EISDIR", async () => {
+    const out = await server.call("find_usages", { path: FIXTURES, identifier: "target" });
+    expect(out).not.toMatch(/EISDIR|^Failed/);
+    expect(out).toContain("callers.ts");
+  });
+
+  // Found while rewriting the walker: a concise arrow's body IS the
+  // expression, so walking only its children skipped the decision point.
+  it("code_complexity counts a ternary in a concise arrow body", async () => {
+    const out = await server.call("code_complexity", { path: KITCHEN });
+    expect(out).toMatch(/concise \(line 75\): 2/);
+  });
+
+  it("the three function walkers agree on one file", async () => {
+    // They used to disagree: each knew a different subset of the language.
+    const listed = await server.call("list_functions", { path: KITCHEN });
+    const scored = await server.call("code_complexity", { path: KITCHEN });
+    const names = (out: string, re: RegExp) =>
+      new Set(out.split("\n").map(l => l.match(re)?.[1]).filter(Boolean));
+    const fromList = names(listed, /^(?:\w+ )*([\w.#]+)\(/);
+    const fromScore = names(scored, /^ {2}([\w.#]+) \(line/);
+    // Nothing is scored that is not listed.
+    expect([...fromScore].filter(n => !fromList.has(n))).toEqual([]);
+    // The only thing listed but not scored is a declaration with no body:
+    // an abstract accessor has no code, so there is nothing to score.
+    expect([...fromList].filter(n => !fromScore.has(n))).toEqual(["BodylessPair.pairValue"]);
+  });
+
+  // ── defects introduced by the shared-walker rewrite itself ────────────
+  //
+  // Consolidating three walkers into one changed what each tool starts its
+  // traversal from, and every one of these is a way that went wrong.
+
+  it("a decorator is not a call the decorated method makes", async () => {
+    const out = await server.call("call_graph", { path: KITCHEN, include_external: true });
+    expect(out).not.toMatch(/Decorated_onlyDecorated.*--> *Log/);
+    const callers = await server.call("get_callers", { path: KITCHEN, function: "Log" });
+    expect(callers).not.toContain("onlyDecorated");
+  });
+
+  it("a builtin whose name matches a local method is not a local call", async () => {
+    // `rows.map(...)` is Array.prototype.map even though `Decorated.map` exists.
+    const out = await server.call("call_graph", { path: KITCHEN });
+    expect(out).not.toMatch(/rows\.map/);
+    // ...but `this.map()` genuinely is the method.
+    expect(out).toMatch(/Decorated_usesBuiltin.*--> *this_map/);
+  });
+
+  it("a branch in a returned inner arrow is scored by somebody", async () => {
+    // The inner arrow is not a scope of its own, so its ternary belongs to the
+    // outer one - counting it nowhere lost the branch entirely.
+    const out = await server.call("code_complexity", { path: KITCHEN });
+    expect(out).toMatch(/curried \(line 129\): 2/);
+  });
+
+  it("a bodyless getter and setter pair both survive", async () => {
+    const out = await server.call("list_functions", { path: KITCHEN });
+    expect(out).toMatch(/get BodylessPair\.pairValue/);
+    expect(out).toMatch(/set BodylessPair\.pairValue/);
+  });
+
+  it("the dotted namespace form keeps every segment", async () => {
+    // `namespace Dotted.Inner` nests declarations rather than opening a block.
+    const out = await server.call("list_functions", { path: KITCHEN });
+    expect(out).toContain("Dotted.Inner.reached");
+    expect(out).not.toMatch(/^\s*(Inner\.)?reached\(/m);
+  });
+
+  it("an object literal held in a class property is still visited", async () => {
+    const out = await server.call("list_functions", { path: KITCHEN });
+    expect(out).toContain("HoldsLiteral.handlers.onClick");
+  });
+
+  it("code_complexity resolves a short name like every other tool", async () => {
+    const out = await server.call("code_complexity", { path: KITCHEN, function: "description" });
+    expect(out).not.toMatch(/No functions found/);
+    expect(out).toMatch(/BaseCar\.description \(line 22\): 2/);
+  });
+
+  it("analyze_file leaves object-literal members to list_functions", async () => {
+    const out = await server.call("analyze_file", { path: CALLERS });
+    expect(out).not.toContain("obj.viaObjectMethod");
+    // ...while a plain nested function is still a symbol of the file.
+    const nested = await server.call("analyze_file", { path: NESTED });
+    expect(nested).toContain("nestedHelper");
+  });
+
+  it("find_usages refuses a path that does not exist, in either scope", async () => {
+    for (const scope of ["file", "package"]) {
+      const out = await server.call("find_usages",
+        { path: path.join(FIXTURES, "nosuchdir"), identifier: "entry", scope });
+      // Package scope used to fall back to searching the parent directory, so
+      // a typo returned confident hits from somewhere never asked about.
+      expect(out, `scope=${scope}`).toMatch(/^Failed to find usages.*ENOENT/);
+    }
+  });
+
+  it("find_usages names the file even when a directory holds only one", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tsast-single-"));
+    try {
+      fs.writeFileSync(path.join(dir, "only.ts"), "export const marker = 1;\n");
+      const out = await server.call("find_usages", { path: dir, identifier: "marker" });
+      expect(out).toContain("only.ts");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("reports a missing file as an error, not a crash", async () => {
