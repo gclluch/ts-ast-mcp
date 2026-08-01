@@ -1,3 +1,6 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Agent scratch memory, not part of the package.
+.claude/
