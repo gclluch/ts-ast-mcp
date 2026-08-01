@@ -14,6 +14,7 @@ const SHAPES = path.join(FIXTURES, "shapes.ts");
 const BINDINGS = path.join(FIXTURES, "bindings.ts");
 const NESTED = path.join(FIXTURES, "nested.ts");
 const SIBLING = path.join(FIXTURES, "sibling.ts");
+const IMPLS = path.join(FIXTURES, "impls.ts");
 const DIST = path.join(HERE, "..", "dist", "index.js");
 
 // ── unit: the two root causes behind the bugs this suite guards ──────────
@@ -249,6 +250,24 @@ describe("tools over stdio", () => {
     expect(out).toMatch(/LoudGreeter \(explicit\)/);
   });
 
+  // Structural matching used to compare member *names* only, so every class
+  // below with a method called `run` was reported as implementing Runner.
+  it("find_implementations checks member types, not just names", async () => {
+    const out = await server.call("find_implementations", { path: IMPLS, interface: "Runner" });
+    expect(out).toMatch(/RealRunner \(explicit\)/);
+    expect(out).toMatch(/QuietRunner \(structural\)/);
+    expect(out).not.toContain("WrongReturnType");
+    expect(out).not.toContain("WrongParamType");
+    expect(out).not.toContain("TooManyParams");
+    expect(out).not.toContain("NotARunner");
+  });
+
+  it("find_implementations refuses a memberless interface instead of matching everything", async () => {
+    const out = await server.call("find_implementations", { path: IMPLS, interface: "Anything" });
+    // Not a match list: `{}` accepts every class, so a list would be noise.
+    expect(out).not.toContain("RealRunner");
+  });
+
   it("call_graph scope=package resolves the containing directory", async () => {
     const out = await server.call("call_graph", { path: SHAPES, scope: "package" });
     expect(out).not.toMatch(/ENOTDIR|^Failed/);
@@ -333,6 +352,19 @@ describe("tools over stdio", () => {
   it("dead_code still finds a genuinely unreferenced symbol", async () => {
     const out = await server.call("dead_code", { path: FIXTURES });
     expect(out).toContain("UnusedShape");
+  });
+
+  it("dead_code reports a dead symbol whose name occurs in another file", async () => {
+    // `probe` in collide.ts is unexported and unreferenced. impls.ts declares an
+    // unrelated local with the same name; scanning other files for the bare name
+    // treated that as a use, so this was silently never reported.
+    const out = await server.call("dead_code", { path: FIXTURES });
+    expect(out).toContain("probe");
+  });
+
+  it("dead_code does not report a symbol used only within its own file", async () => {
+    const out = await server.call("dead_code", { path: FIXTURES });
+    expect(out).not.toMatch(/\busedHelper\b/);
   });
 
   it("list_exports expands a destructured export", async () => {
