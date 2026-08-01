@@ -4,25 +4,51 @@ import path from "node:path";
 
 // ── Syntactic (fast path) ──────────────────────────────────────────────
 
+/**
+ * `ts.createSourceFile` never throws - it returns a best-effort AST for input it
+ * could not parse. Left unchecked, a file with a syntax error yields an empty or
+ * nonsense tree, and every tool then reports "nothing found", which is
+ * indistinguishable from a genuinely clean file. Refuse instead: a caller that
+ * gets an error knows the analysis did not happen.
+ */
+function assertParsed(sf: ts.SourceFile): ts.SourceFile {
+  // parseDiagnostics is internal to the compiler API but is the only way to see
+  // syntax errors without building a full Program.
+  const diags = (sf as ts.SourceFile & { parseDiagnostics?: ts.Diagnostic[] })
+    .parseDiagnostics ?? [];
+  if (diags.length === 0) return sf;
+  const first = diags[0];
+  const { line } = sf.getLineAndCharacterOfPosition(first.start ?? 0);
+  const msg = ts.flattenDiagnosticMessageText(first.messageText, " ");
+  throw new Error(
+    `${diags.length} syntax error${diags.length === 1 ? "" : "s"} - ` +
+      `first at line ${line + 1}: ${msg}`,
+  );
+}
+
 export function parseFile(filePath: string): ts.SourceFile {
   const absPath = path.resolve(filePath);
   const content = fs.readFileSync(absPath, "utf-8");
-  return ts.createSourceFile(
-    absPath,
-    content,
-    ts.ScriptTarget.Latest,
-    true,
-    getScriptKind(absPath),
+  return assertParsed(
+    ts.createSourceFile(
+      absPath,
+      content,
+      ts.ScriptTarget.Latest,
+      true,
+      getScriptKind(absPath),
+    ),
   );
 }
 
 export function parseSource(content: string, fileName = "input.ts"): ts.SourceFile {
-  return ts.createSourceFile(
-    fileName,
-    content,
-    ts.ScriptTarget.Latest,
-    true,
-    getScriptKind(fileName),
+  return assertParsed(
+    ts.createSourceFile(
+      fileName,
+      content,
+      ts.ScriptTarget.Latest,
+      true,
+      getScriptKind(fileName),
+    ),
   );
 }
 

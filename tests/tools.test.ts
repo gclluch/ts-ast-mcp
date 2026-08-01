@@ -4,7 +4,7 @@ import path from "node:path";
 import url from "node:url";
 import fs from "node:fs";
 import os from "node:os";
-import { listTsFiles, bindingNames, loadProgram } from "../src/parse.js";
+import { listTsFiles, bindingNames, loadProgram, parseFile } from "../src/parse.js";
 import { parseSource } from "../src/parse.js";
 import ts from "typescript";
 
@@ -60,6 +60,38 @@ describe("bindingNames", () => {
   it("expands nested and renamed bindings", () => {
     expect(bindingNames(firstDecl("const { a: { b }, c: renamed } = x;")))
       .toEqual(["b", "renamed"]);
+  });
+});
+
+describe("syntax errors are never reported as clean", () => {
+  it("parseSource refuses a file it could not parse", () => {
+    expect(() => parseSource("export function busted({, { , { oops\n  const x = ;;;\n"))
+      .toThrow(/syntax error/i);
+  });
+
+  it("names the first error and its line", () => {
+    let msg = "";
+    try {
+      parseSource("const ok = 1;\nfunction broken({, { {\n");
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/line 2/);
+  });
+
+  it("still parses valid source", () => {
+    expect(() => parseSource("export const a = 1;\n")).not.toThrow();
+  });
+
+  it("parseFile refuses a broken file on disk", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tsast-broken-"));
+    const f = path.join(dir, "broken.ts");
+    fs.writeFileSync(f, "class Foo { bar( { , { \n");
+    try {
+      expect(() => parseFile(f)).toThrow(/syntax error/i);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
