@@ -1,6 +1,8 @@
 # TypeScript AST MCP Server
 
-A Model Context Protocol (MCP) server for deep structural analysis of TypeScript and JavaScript source code. Unlike text-based search, this server parses your code with the TypeScript Compiler API (`ts.createSourceFile`) and walks the real AST - types, functions, call relationships, interface satisfaction, and more.
+A Model Context Protocol (MCP) server for deep structural analysis of TypeScript and JavaScript source code. Unlike text-based search, this server parses your code with the TypeScript Compiler API and walks the real AST - types, functions, call relationships, interface satisfaction, and more.
+
+Most tools run on the syntactic tier (`ts.createSourceFile`, no type resolution) because it is fast and needs no build. `find_implementations` runs on the semantic tier - a full `ts.Program` and its type checker - because deciding whether a class satisfies an interface cannot be done from syntax alone. Each tool's tier is stated in the table below.
 
 Companion to [py-ast-mcp](https://github.com/gclluch/py-ast-mcp), the same idea applied to Python; a Go AST MCP server by another author served as prior art for this one.
 
@@ -9,15 +11,15 @@ Companion to [py-ast-mcp](https://github.com/gclluch/py-ast-mcp), the same idea 
 - **20 analysis tools** covering file-level, directory-level, and cross-file structural queries
 - **Fast syntactic parsing** - `ts.createSourceFile()` per file, under 5ms; cross-file tools re-parse in scope, so results always reflect the latest edit
 - **Arrow function awareness** - `const foo = () => {}` treated as first-class functions throughout
-- **Full signature extraction** with parameter types, return types, and class-qualified names
+- **Signature extraction** - parameters, class-qualified names, and return types **as written**. These come from the annotation, so an unannotated return reads as blank rather than as the inferred type
 - **Call graph generation** with Mermaid diagrams, forward and reverse traversal, file or package scope
 - **Cyclomatic complexity** computation per function
-- **Interface implementation discovery** - explicit `implements` and structural matching
+- **Interface implementation discovery** - explicit `implements` plus structural matches decided by the type checker's own assignability rules, so member types and call signatures count, not just member names
 - **Structural diffing** between file versions (added/removed/modified symbols)
 - **Cursor-position awareness** for IDE integrations
-- **JSX/TSX support** - handles React components natively
+- **JSX/TSX parsing** - `.tsx`/`.jsx` files parse under the right `ScriptKind`, so every tool works on React source. There is no React-specific analysis: a component is a function like any other
 - **TypeScript-specific quality checks** - `any` casts, non-null assertions, floating promises, empty catches, double assertions
-- **Dead code detection** - unreferenced unexported symbols across a directory
+- **Dead code detection** - unexported symbols never referenced within their own file. Unexported means file-local, so that is the whole search space. A same-named binding in another scope of the same file still reads as a use, which makes this under-report rather than over-report
 - **JSDoc/TSDoc extraction** for any symbol
 
 ## Tools
@@ -59,8 +61,8 @@ Companion to [py-ast-mcp](https://github.com/gclluch/py-ast-mcp), the same idea 
 | `code_complexity` | Cyclomatic complexity per function | `path`, `function`\* |
 | `code_smells` | Long functions, deep nesting, god classes, `any` casts, non-null assertions | `path`, `function`\* |
 | `find_errors` | Floating promises, empty catches, double type assertions, optional chain + non-null | `path`, `function`\* |
-| `dead_code` | Find unreferenced unexported symbols within a directory | `path` (directory), `include_tests`\* |
-| `find_implementations` | Find classes implementing an interface (explicit or structural match) | `path`, `interface` |
+| `dead_code` | Find unexported symbols never referenced inside their own file | `path` (directory), `include_tests`\* |
+| `find_implementations` | Find classes satisfying an interface - explicit `implements` or type-checked structural match (**semantic tier**) | `path`, `interface` |
 
 \* Optional - omit to report all functions / exclude test files.
 
@@ -170,9 +172,13 @@ Then point your `.mcp.json` at the local build:
 
 Most tools use the **syntactic tier** - `ts.createSourceFile()` parses a single file in under 5ms. No tsconfig or type checker needed.
 
-Tools that operate across files (`dead_code`, `find_implementations`, `analyze_package`) and tools with `scope: "package"` (`call_graph`, `get_callers`) currently do this by re-parsing every file in scope on each call via the syntactic parser - always correct on the latest edit, at the cost of re-parsing repeatedly.
+Tools that operate across files (`dead_code`, `analyze_package`) and tools with `scope: "package"` (`call_graph`, `get_callers`) do this by re-parsing every file in scope on each call via the syntactic parser - always correct on the latest edit, at the cost of re-parsing repeatedly.
 
-A **semantic tier** exists but is not yet wired to any tool: `loadProgram()` (in `src/parse.ts`) builds a cached, type-checker-backed `ts.Program`, keyed by tsconfig path (or the target directory, when there's no tsconfig). It invalidates whenever the tsconfig's mtime changes *or* the mtime of any file that fed the program changes - so a source edit is always reflected on the next call, and an unchanged tree reuses the same `Program` instead of rebuilding it. It's the intended foundation for true type-aware queries (resolving a symbol to its declaration across files, structural type comparison); until a tool calls it, everything above is syntactic.
+The **semantic tier** backs `find_implementations`, the one question that syntax cannot answer: whether a class satisfies an interface depends on member *types* and call signatures, not member names. `loadProgram()` (in `src/parse.ts`) builds a cached `ts.Program` and hands the tool the real type checker, which then answers via `isTypeAssignableTo` - the same rule the compiler applies to an `implements` clause.
+
+Compiler options come from the nearest `tsconfig.json`; the file list never does. `findConfigFile` walks *up*, so the directory you asked about is routinely outside that config's `include`, and building from the config's own file list would produce a program that doesn't contain the files under analysis. The cache invalidates when the tsconfig's mtime changes *or* any file feeding the program changes, so an edit is always reflected on the next call while an unchanged tree reuses the `Program`.
+
+Cost of the semantic tier is real: the first `find_implementations` call on a directory pays a full parse-bind-check pass. Subsequent calls on an unchanged tree are cache hits.
 
 Arrow functions (`const foo = () => {}`) are detected as first-class functions throughout - they appear in `list_functions`, `get_function_body`, `code_complexity`, `code_smells`, and all other function-aware tools.
 
