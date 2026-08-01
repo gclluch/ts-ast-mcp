@@ -9,17 +9,15 @@ export interface FileSymbol {
   signature?: string;
 }
 
-export interface Smell {
+/** A located, categorised remark about a span of code. */
+export interface Finding {
   kind: string;
   location: string;
   message: string;
 }
 
-export interface ErrorFinding {
-  kind: string;
-  location: string;
-  message: string;
-}
+export type Smell = Finding;
+export type ErrorFinding = Finding;
 
 export interface ComplexityResult {
   name: string;
@@ -71,23 +69,20 @@ export function formatSymbols(symbols: FileSymbol[], filePath?: string): string 
   return sections.join("\n");
 }
 
-export function formatSmells(smells: Smell[], filePath: string): string {
-  if (smells.length === 0) return `No code smells found in ${filePath}.`;
-  const lines = [`Code smells in ${filePath}:`, ""];
-  for (const s of smells) {
-    lines.push(`[${s.kind}] ${s.location}: ${s.message}`);
+function formatFindings(findings: Finding[], filePath: string, label: string): string {
+  if (findings.length === 0) return `No ${label} found in ${filePath}.`;
+  const lines = [`${label[0].toUpperCase()}${label.slice(1)} in ${filePath}:`, ""];
+  for (const f of findings) {
+    lines.push(`[${f.kind}] ${f.location}: ${f.message}`);
   }
   return lines.join("\n");
 }
 
-export function formatErrors(errors: ErrorFinding[], filePath: string): string {
-  if (errors.length === 0) return `No error patterns found in ${filePath}.`;
-  const lines = [`Error patterns in ${filePath}:`, ""];
-  for (const e of errors) {
-    lines.push(`[${e.kind}] ${e.location}: ${e.message}`);
-  }
-  return lines.join("\n");
-}
+export const formatSmells = (smells: Smell[], filePath: string) =>
+  formatFindings(smells, filePath, "code smells");
+
+export const formatErrors = (errors: ErrorFinding[], filePath: string) =>
+  formatFindings(errors, filePath, "error patterns");
 
 export function formatComplexity(results: ComplexityResult[], filePath: string): string {
   if (results.length === 0) return `No functions found in ${filePath}.`;

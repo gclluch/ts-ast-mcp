@@ -131,6 +131,22 @@ export function isExported(node: ts.Node): boolean {
   return false;
 }
 
+/**
+ * Names actually bound by a declaration.
+ *
+ * `decl.name.getText()` returns the literal `{ a, b }` for a destructuring
+ * pattern, which matches no identifier anywhere - so callers that compare or
+ * count names must expand the pattern instead.
+ */
+export function bindingNames(name: ts.BindingName): string[] {
+  if (ts.isIdentifier(name)) return [name.getText()];
+  const out: string[] = [];
+  for (const el of name.elements) {
+    if (ts.isBindingElement(el)) out.push(...bindingNames(el.name));
+  }
+  return out;
+}
+
 export function isArrowOrFunctionExpr(node: ts.VariableDeclaration): boolean {
   return !!node.initializer && (
     ts.isArrowFunction(node.initializer) ||
@@ -149,9 +165,14 @@ export function getVisibility(node: ts.Node): string {
   return "";
 }
 
-/** Collect TS/JS files in a directory (non-recursive) */
+/** Collect TS/JS files under a path. A file resolves to itself. */
 export function listTsFiles(dir: string, recursive = false): string[] {
   const absDir = path.resolve(dir);
+  // Callers pass either a directory or a single file; without this a file path
+  // reaches readdirSync and throws ENOTDIR.
+  if (fs.existsSync(absDir) && fs.statSync(absDir).isFile()) {
+    return /\.(tsx?|jsx?|mjs|cjs)$/.test(absDir) ? [absDir] : [];
+  }
   if (!recursive) {
     return fs.readdirSync(absDir)
       .filter(f => /\.(tsx?|jsx?|mjs|cjs)$/.test(f) && !f.endsWith(".d.ts"))

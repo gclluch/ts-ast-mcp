@@ -12,6 +12,7 @@
     "build": "tsc -p tsconfig.build.json",
     "dev": "tsc -p tsconfig.build.json --watch",
     "start": "node dist/index.js",
+    "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"
   },

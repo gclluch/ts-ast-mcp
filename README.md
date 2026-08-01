@@ -176,6 +176,17 @@ Arrow functions (`const foo = () => {}`) are detected as first-class functions t
 
 All output is plain text, not JSON.
 
+## Development
+
+```bash
+npm install
+npm test        # builds, then runs the vitest suite
+```
+
+The suite covers the pure helpers (`listTsFiles`, `bindingNames`) plus an
+integration layer that spawns the real stdio server and drives it over JSON-RPC,
+so tool wiring is exercised the way a client actually uses it.
+
 ## How to Verify
 
 Once registered, you can ask your AI assistant to:

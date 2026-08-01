@@ -1,7 +1,7 @@
 import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseFile, extractSource, getLineRange, isExported } from "../parse.js";
+import { parseFile, extractSource, getLineRange, isExported, bindingNames } from "../parse.js";
 import { textResult, errorResult } from "../format.js";
 
 function findTypeNode(sourceFile: ts.SourceFile, targetName: string): ts.Node | undefined {
@@ -115,7 +115,10 @@ function collectExports(sourceFile: ts.SourceFile): ExportInfo[] {
       exports.push({ name: node.name.getText(sourceFile), kind: "enum", line, isDefault: false });
     } else if (ts.isVariableStatement(node)) {
       for (const decl of node.declarationList.declarations) {
-        exports.push({ name: decl.name.getText(sourceFile), kind: "variable", line, isDefault: false });
+        // `export const { a, b } = x` exports a and b, not a symbol named "{ a, b }"
+        for (const name of bindingNames(decl.name)) {
+          exports.push({ name, kind: "variable", line, isDefault: false });
+        }
       }
     }
   }

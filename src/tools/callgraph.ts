@@ -1,4 +1,6 @@
 import ts from "typescript";
+import fs from "node:fs";
+import path from "node:path";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, isArrowOrFunctionExpr, listTsFiles } from "../parse.js";
@@ -131,9 +133,14 @@ function toMermaid(edges: CallEdge[], direction: string): string {
 }
 
 function collectPackageCallEdges(
-  dir: string,
+  target: string,
   opts: { focusFunction?: string; includeExternal?: boolean },
 ): { edges: CallEdge[]; localFunctions: Set<string> } {
+  // Both call sites pass the tool's `path`, which is a file. "Package" scope
+  // means the directory that file lives in.
+  const dir = fs.existsSync(target) && fs.statSync(target).isFile()
+    ? path.dirname(target)
+    : target;
   const files = listTsFiles(dir, true);
   const allEdges: CallEdge[] = [];
   const allLocalFunctions = new Set<string>();

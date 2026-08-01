@@ -117,16 +117,13 @@ export function register(server: McpServer) {
     },
     async ({ path: targetPath, interface: interfaceName }) => {
       try {
-        // First find the interface definition
+        // listTsFiles resolves a file to itself and a directory to its tree,
+        // so both cases are the same list from here on.
         const files = listTsFiles(targetPath, true);
+        const isFile = files.length === 1 && files[0] === path.resolve(targetPath);
+
         let iface: InterfaceInfo | undefined;
-
-        // If path is a file, also search for interface there
-        const isFile = targetPath.endsWith(".ts") || targetPath.endsWith(".tsx") ||
-                       targetPath.endsWith(".js") || targetPath.endsWith(".jsx");
-        const searchFiles = isFile ? [targetPath] : files;
-
-        for (const file of searchFiles) {
+        for (const file of files) {
           const sf = parseFile(file);
           iface = extractInterfaceInfo(sf, interfaceName);
           if (iface) break;
@@ -136,7 +133,7 @@ export function register(server: McpServer) {
 
         // Collect all classes and check which implement the interface
         const allClasses: ClassInfo[] = [];
-        for (const file of (isFile ? [targetPath] : files)) {
+        for (const file of files) {
           const sf = parseFile(file);
           allClasses.push(...collectClasses(sf, file));
         }

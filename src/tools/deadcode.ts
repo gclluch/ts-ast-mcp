@@ -2,7 +2,7 @@ import ts from "typescript";
 import path from "node:path";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseFile, isExported, isArrowOrFunctionExpr, listTsFiles, getLineRange } from "../parse.js";
+import { parseFile, isExported, isArrowOrFunctionExpr, listTsFiles, getLineRange, bindingNames } from "../parse.js";
 import { textResult, errorResult } from "../format.js";
 
 interface UnexportedSymbol {
@@ -38,12 +38,14 @@ function collectUnexportedSymbols(sourceFile: ts.SourceFile, filePath: string): 
       const [line] = getLineRange(sourceFile, node);
       symbols.push({ name: node.name.getText(sourceFile), kind: "enum", file: filePath, line });
     }
-    if (ts.isVariableStatement(node) && !isExported(node)) {
+    if (ts.isVariableStatement(node)) {  // exported already returned above
       for (const decl of node.declarationList.declarations) {
-        const name = decl.name.getText(sourceFile);
         const kind = isArrowOrFunctionExpr(decl) ? "function" : "variable";
         const [line] = getLineRange(sourceFile, node);
-        symbols.push({ name, kind, file: filePath, line });
+        // destructuring binds several names; each is tracked on its own
+        for (const name of bindingNames(decl.name)) {
+          symbols.push({ name, kind, file: filePath, line });
+        }
       }
     }
   }
@@ -52,18 +54,21 @@ function collectUnexportedSymbols(sourceFile: ts.SourceFile, filePath: string): 
   return symbols;
 }
 
-function collectAllIdentifiers(sourceFile: ts.SourceFile): Set<string> {
-  const ids = new Set<string>();
+/** Occurrence count per identifier name. Counts, not just presence, so a
+ *  symbol's own declaration can be told apart from real uses. */
+function countIdentifiers(sourceFile: ts.SourceFile): Map<string, number> {
+  const counts = new Map<string, number>();
 
   function visit(node: ts.Node) {
     if (ts.isIdentifier(node)) {
-      ids.add(node.getText(sourceFile));
+      const name = node.getText(sourceFile);
+      counts.set(name, (counts.get(name) ?? 0) + 1);
     }
     ts.forEachChild(node, visit);
   }
 
   ts.forEachChild(sourceFile, visit);
-  return ids;
+  return counts;
 }
 
 export function register(server: McpServer) {
@@ -83,44 +88,30 @@ export function register(server: McpServer) {
 
         if (files.length === 0) return textResult(`No TypeScript/JavaScript files found in ${dirPath}.`);
 
-        // Collect all unexported symbols and all identifier references
+        // One parse per file: collect unexported symbols and identifier counts
+        // together. Re-parsing per symbol below turned this into O(symbols x files).
         const allSymbols: UnexportedSymbol[] = [];
-        const allIdentifiers = new Set<string>();
+        const countsByFile = new Map<string, Map<string, number>>();
 
         for (const file of files) {
           const sf = parseFile(file);
           allSymbols.push(...collectUnexportedSymbols(sf, file));
-          for (const id of collectAllIdentifiers(sf)) {
-            allIdentifiers.add(id);
-          }
+          countsByFile.set(file, countIdentifiers(sf));
         }
 
-        // A symbol is "dead" if its name only appears once across all files
-        // (its own declaration). We count occurrences per file to be more accurate.
+        // Dead = never named in another file, and named at most once in its own
+        // file (that one occurrence being its declaration).
         const dead: UnexportedSymbol[] = [];
         for (const sym of allSymbols) {
-          let refCount = 0;
-          for (const file of files) {
-            if (file === sym.file) continue; // Skip the declaring file for cross-file refs
-            const sf = parseFile(file);
-            const ids = collectAllIdentifiers(sf);
-            if (ids.has(sym.name)) refCount++;
+          let usedElsewhere = false;
+          for (const [file, counts] of countsByFile) {
+            if (file === sym.file) continue;
+            if (counts.has(sym.name)) { usedElsewhere = true; break; }
           }
-          // Also check within the same file for usages beyond declaration
-          const sf = parseFile(sym.file);
-          let selfRefs = 0;
-          function countSelfRefs(node: ts.Node) {
-            if (ts.isIdentifier(node) && node.getText(sf) === sym.name) {
-              selfRefs++;
-            }
-            ts.forEachChild(node, countSelfRefs);
-          }
-          ts.forEachChild(sf, countSelfRefs);
+          if (usedElsewhere) continue;
 
-          // If the name appears only once (its declaration) in own file and zero times elsewhere
-          if (refCount === 0 && selfRefs <= 1) {
-            dead.push(sym);
-          }
+          const selfRefs = countsByFile.get(sym.file)?.get(sym.name) ?? 0;
+          if (selfRefs <= 1) dead.push(sym);
         }
 
         if (dead.length === 0) return textResult(`No dead code found in ${dirPath}.`);
