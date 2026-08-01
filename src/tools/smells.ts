@@ -11,6 +11,7 @@ const GOD_CLASS_METHODS = 15;
 
 function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell[] {
   const smells: Smell[] = [];
+  const matchedFunctions: ts.Node[] = [];
 
   function checkNesting(node: ts.Node, depth: number, funcName: string) {
     const nestingNodes = [
@@ -37,6 +38,10 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
 
   function checkFunction(name: string, node: ts.Node, params: ts.NodeArray<ts.ParameterDeclaration>) {
     if (targetFunction && name !== targetFunction) return;
+    // Remember the matched subtree so the file-wide checks below can be scoped
+    // to it too, instead of reporting every `as any` in the file as if it were
+    // inside the requested function.
+    if (targetFunction) matchedFunctions.push(node);
 
     const [startLine, endLine] = getLineRange(sourceFile, node);
     const lineCount = endLine - startLine + 1;
@@ -139,8 +144,15 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
   }
 
   ts.forEachChild(sourceFile, visit);
-  checkAnyCasts(sourceFile);
-  checkNonNullAssertions(sourceFile);
+
+  // Scope the whole-tree checks to the requested function when there is one.
+  // Running them against sourceFile regardless made `function` look like it
+  // worked while still reporting casts from everywhere else in the file.
+  const roots: ts.Node[] = targetFunction ? matchedFunctions : [sourceFile];
+  for (const root of roots) {
+    checkAnyCasts(root);
+    checkNonNullAssertions(root);
+  }
 
   return smells;
 }
