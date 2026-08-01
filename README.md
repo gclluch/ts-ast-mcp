@@ -31,7 +31,7 @@ Companion to [py-ast-mcp](https://github.com/gclluch/py-ast-mcp), the same idea 
 | `analyze_file` | High-level summary of all symbols (classes, interfaces, types, enums, functions) | `path` |
 | `list_functions` | List all functions/methods with full signatures and line ranges | `path` |
 | `get_function_body` | Extract a function/method body (supports `Class.method` syntax) | `path`, `name` |
-| `list_methods` | List all methods for a class | `path`, `type` |
+| `list_methods` | List all methods for a class or interface | `path`, `type` |
 | `get_type_definition` | Extract any type definition (interface, type alias, class, enum) | `path`, `name` |
 | `list_declarations` | List module-level const/let/var with types | `path` |
 | `list_exports` | List all exported symbols with kind (function, class, type, re-export) | `path` |

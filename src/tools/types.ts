@@ -4,7 +4,7 @@ import { z } from "zod";
 import { parseFile, extractSource, getLineRange, isExported, bindingNames } from "../parse.js";
 import { textResult, safeTool } from "../format.js";
 
-function findTypeNode(sourceFile: ts.SourceFile, targetName: string): ts.Node | undefined {
+export function findTypeNode(sourceFile: ts.SourceFile, targetName: string): ts.Node | undefined {
   let result: ts.Node | undefined;
 
   function visit(node: ts.Node) {

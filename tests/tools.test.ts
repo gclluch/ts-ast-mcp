@@ -425,6 +425,36 @@ describe("tools over stdio", () => {
     expect(out).toMatch(/No AST node found/);
   });
 
+  // ── the seven tools that had no behavioural assertion ─────────────────
+  //
+  // Each of these appeared only in the ALL_TOOLS table below, which asserts
+  // "not empty" and "does not start with Failed to". That passes for output
+  // that is confidently wrong, which is how the list_methods bug survived.
+
+  it("list_methods reports a class method with its real signature", async () => {
+    const out = await server.call("list_methods", { path: SHAPES, type: "LoudGreeter" });
+    expect(out.trim()).toBe("LoudGreeter.greet(name: string): string [Lines 8-10]");
+  });
+
+  // collectFunctions walks class declarations only, so every interface
+  // answered "No methods found for class X" - a verdict on the type, for a
+  // type the tool had never looked inside.
+  it("list_methods reports interface methods instead of a false all-clear", async () => {
+    const out = await server.call("list_methods", { path: SHAPES, type: "Greeter" });
+    expect(out).not.toMatch(/No methods found/);
+    expect(out.trim()).toBe("Greeter.greet(name: string): string [Lines 4-4]");
+  });
+
+  it("list_methods separates an absent type from a memberless one", async () => {
+    const missing = await server.call("list_methods", { path: SHAPES, type: "NoSuchType" });
+    expect(missing).toMatch(/Type "NoSuchType" not found/);
+
+    const empty = await server.call("list_methods", { path: IMPLS, type: "Anything" });
+    expect(empty).toMatch(/"Anything" declares no methods/);
+    // The distinction is the point: both used to be the same sentence.
+    expect(empty).not.toMatch(/not found/);
+  });
+
   it("reports a missing file as an error, not a crash", async () => {
     const out = await server.call("analyze_file", { path: "/no/such/file.ts" });
     expect(out).toMatch(/Failed|ENOENT/);
