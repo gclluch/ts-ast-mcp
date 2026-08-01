@@ -11,19 +11,34 @@ import path from "node:path";
  * indistinguishable from a genuinely clean file. Refuse instead: a caller that
  * gets an error knows the analysis did not happen.
  */
+function syntaxError(sf: ts.SourceFile, diags: readonly ts.Diagnostic[]): Error {
+  const first = diags[0];
+  const { line } = sf.getLineAndCharacterOfPosition(first.start ?? 0);
+  const msg = ts.flattenDiagnosticMessageText(first.messageText, " ");
+  return new Error(
+    `${diags.length} syntax error${diags.length === 1 ? "" : "s"} in ` +
+      `${path.basename(sf.fileName)} - first at line ${line + 1}: ${msg}`,
+  );
+}
+
 function assertParsed(sf: ts.SourceFile): ts.SourceFile {
   // parseDiagnostics is internal to the compiler API but is the only way to see
   // syntax errors without building a full Program.
   const diags = (sf as ts.SourceFile & { parseDiagnostics?: ts.Diagnostic[] })
     .parseDiagnostics ?? [];
   if (diags.length === 0) return sf;
-  const first = diags[0];
-  const { line } = sf.getLineAndCharacterOfPosition(first.start ?? 0);
-  const msg = ts.flattenDiagnosticMessageText(first.messageText, " ");
-  throw new Error(
-    `${diags.length} syntax error${diags.length === 1 ? "" : "s"} - ` +
-      `first at line ${line + 1}: ${msg}`,
-  );
+  throw syntaxError(sf, diags);
+}
+
+/**
+ * The Program equivalent of `assertParsed`: same refusal, same message, for
+ * tools that go through the semantic tier instead of `parseFile`.
+ */
+export function assertProgramParsed(program: ts.Program, sources: readonly ts.SourceFile[]): void {
+  for (const sf of sources) {
+    const diags = program.getSyntacticDiagnostics(sf);
+    if (diags.length > 0) throw syntaxError(sf, diags);
+  }
 }
 
 export function parseFile(filePath: string): ts.SourceFile {
@@ -129,13 +144,17 @@ export function loadProgram(dir: string): ts.Program {
       ts.sys,
       path.dirname(configPath),
     );
-    fileNames = parsed.fileNames;
     options = parsed.options;
   } else {
-    // No tsconfig - build from every TS/JS file in the directory.
-    fileNames = collectTsFiles(absDir);
     options = DEFAULT_COMPILER_OPTIONS;
   }
+
+  // Options come from the nearest tsconfig; the file list never does.
+  // findConfigFile walks UP, so the directory a caller asked about is routinely
+  // outside that config's `include` - taking parsed.fileNames would hand back a
+  // program that does not contain the files being analysed, and every semantic
+  // tool would report nothing found.
+  fileNames = collectTsFiles(absDir);
 
   const fileMtimes = statMtimes(fileNames);
   const cached = programCache.get(cacheKey);
