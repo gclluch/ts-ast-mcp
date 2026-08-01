@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # 20 is the floor the MCP SDK supports; 22 is current LTS.
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # `bin` points into dist/, so a tarball without it installs an entry point
+      # that does not exist. Assert the built entry ships rather than trusting
+      # the `files` field to stay correct.
+      - name: entry point is in the tarball
+        run: npm pack --dry-run --json | grep -q '"path": "dist/index.js"'
+      - name: packaged server answers over stdio
+        run: |
+          npm pack --pack-destination /tmp
+          npm install -g /tmp/ts-ast-mcp-*.tgz
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | ts-ast-mcp | grep -q '"serverInfo"'
