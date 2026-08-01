@@ -21,6 +21,14 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
       ts.SyntaxKind.SwitchStatement, ts.SyntaxKind.TryStatement,
     ];
 
+    // A nested function is checked in its own right, so descending into it here
+    // would report its nesting twice - once under each enclosing function's name,
+    // and at a depth that counts the outer function's blocks as its own.
+    const descend = (child: ts.Node, childDepth: number) => {
+      if (ts.isFunctionLike(child)) return;
+      checkNesting(child, childDepth, funcName);
+    };
+
     if (nestingNodes.includes(node.kind)) {
       if (depth >= DEEP_NESTING) {
         const [line] = getLineRange(sourceFile, node);
@@ -30,10 +38,10 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
           message: `Nesting depth ${depth + 1} exceeds threshold of ${DEEP_NESTING}`,
         });
       }
-      ts.forEachChild(node, child => checkNesting(child, depth + 1, funcName));
+      ts.forEachChild(node, child => descend(child, depth + 1));
       return;
     }
-    ts.forEachChild(node, child => checkNesting(child, depth, funcName));
+    ts.forEachChild(node, child => descend(child, depth));
   }
 
   function checkFunction(name: string, node: ts.Node, params: ts.NodeArray<ts.ParameterDeclaration>) {
@@ -141,6 +149,13 @@ function detectSmells(sourceFile: ts.SourceFile, targetFunction?: string): Smell
         }
       }
     }
+
+    // Descend. Without this only top-level declarations were ever checked: a
+    // function nested in another function was invisible, so its parameter count
+    // and length went unreported, its nesting was attributed to the enclosing
+    // function, and asking for it by name returned "No code smells found" - an
+    // all-clear for a function that had never been looked at.
+    ts.forEachChild(node, visit);
   }
 
   ts.forEachChild(sourceFile, visit);
