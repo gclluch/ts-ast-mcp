@@ -1,180 +1,55 @@
 import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseFile, extractSource, getLineRange, isExported, isArrowOrFunctionExpr, getVisibility } from "../parse.js";
+import { parseFile, extractSource, getLineRange } from "../parse.js";
+import {
+  type FunctionScope,
+  collectFunctionScopes,
+  findScopes,
+  signatureOf,
+  withoutOverloadSignatures,
+} from "../scopes.js";
 import { textResult, safeTool } from "../format.js";
 import { findTypeNode } from "./types.js";
 
-interface FuncInfo {
-  name: string;
-  signature: string;
-  line: number;
-  endLine: number;
-  exported: boolean;
-  className?: string;
-  visibility?: string;
+/**
+ * How a function reads on one line. Every qualifier that changes what the
+ * caller may do with it is present: `static` because `Cls.build()` is not
+ * `instance.build()`, and `get`/`set` because an accessor is used as a
+ * property. Leaving either out made two different members render identically.
+ */
+function describe(
+  scope: FunctionScope,
+  sf: ts.SourceFile,
+  // list_methods was asked about one type, so repeating that type's export
+  // status on every row is noise; `private`/`protected` already say what
+  // differs between the members.
+  showExported = true,
+): string {
+  const parts = [
+    scope.visibility,
+    scope.isStatic ? "static" : "",
+    scope.kind === "get" || scope.kind === "set" ? scope.kind : "",
+  ].filter(Boolean);
+  const prefix = parts.length ? `${parts.join(" ")} ` : "";
+  const [line, endLine] = getLineRange(sf, scope.node);
+  const exp = showExported && scope.isExported ? " (exported)" : "";
+  return `${prefix}${scope.name}${signatureOf(scope, sf)}${exp} [Lines ${line}-${endLine}]`;
 }
 
-function collectFunctions(sourceFile: ts.SourceFile): FuncInfo[] {
-  const funcs: FuncInfo[] = [];
-
-  function visitClassMembers(classNode: ts.ClassDeclaration) {
-    const className = classNode.name?.getText(sourceFile) ?? "<anonymous>";
-    for (const member of classNode.members) {
-      if (ts.isMethodDeclaration(member) || ts.isConstructorDeclaration(member)) {
-        const name = ts.isConstructorDeclaration(member)
-          ? "constructor"
-          : member.name?.getText(sourceFile) ?? "<computed>";
-        const params = member.parameters.map(p => p.getText(sourceFile)).join(", ");
-        const ret = member.type ? `: ${member.type.getText(sourceFile)}` : "";
-        const [line, endLine] = getLineRange(sourceFile, member);
-        funcs.push({
-          name: `${className}.${name}`,
-          signature: `(${params})${ret}`,
-          line,
-          endLine,
-          exported: isExported(classNode),
-          className,
-          visibility: getVisibility(member),
-        });
-      }
-
-      // Arrow function properties in classes
-      if (ts.isPropertyDeclaration(member) && member.initializer &&
-          (ts.isArrowFunction(member.initializer) || ts.isFunctionExpression(member.initializer))) {
-        const name = member.name?.getText(sourceFile) ?? "<computed>";
-        const init = member.initializer;
-        const params = init.parameters.map(p => p.getText(sourceFile)).join(", ");
-        const ret = init.type ? `: ${init.type.getText(sourceFile)}` : "";
-        const [line, endLine] = getLineRange(sourceFile, member);
-        funcs.push({
-          name: `${className}.${name}`,
-          signature: `(${params})${ret}`,
-          line,
-          endLine,
-          exported: isExported(classNode),
-          className,
-          visibility: getVisibility(member),
-        });
-      }
-    }
-  }
-
-  // `prefix` names nested definitions as `outer.helper`, matching
-  // code_complexity and the Python sibling. Without the recursion below,
-  // nested functions and anything inside a namespace were simply absent -
-  // and analyze_file listed them, so the two tools disagreed on one file.
-  function visit(node: ts.Node, prefix: string) {
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      const name = prefix + node.name.getText(sourceFile);
-      const params = node.parameters.map(p => p.getText(sourceFile)).join(", ");
-      const ret = node.type ? `: ${node.type.getText(sourceFile)}` : "";
-      const [line, endLine] = getLineRange(sourceFile, node);
-      funcs.push({
-        name,
-        signature: `(${params})${ret}`,
-        line,
-        endLine,
-        exported: isExported(node),
-      });
-      if (node.body) ts.forEachChild(node.body, child => visit(child, `${name}.`));
-      return;
-    }
-
-    if (ts.isClassDeclaration(node)) {
-      visitClassMembers(node);
-      return;
-    }
-
-    // Module-level arrow functions
-    if (ts.isVariableStatement(node)) {
-      for (const decl of node.declarationList.declarations) {
-        if (ts.isVariableDeclaration(decl) && isArrowOrFunctionExpr(decl)) {
-          const name = prefix + decl.name.getText(sourceFile);
-          const init = decl.initializer!;
-          let sig = "";
-          if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
-            const params = init.parameters.map(p => p.getText(sourceFile)).join(", ");
-            const ret = init.type ? `: ${init.type.getText(sourceFile)}` : "";
-            sig = `(${params})${ret}`;
-          }
-          const [line, endLine] = getLineRange(sourceFile, node);
-          funcs.push({
-            name,
-            signature: sig,
-            line,
-            endLine,
-            exported: isExported(node),
-          });
-          if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
-            if (init.body) ts.forEachChild(init.body, child => visit(child, `${name}.`));
-          }
-        }
-      }
-      return;
-    }
-
-    ts.forEachChild(node, child => visit(child, prefix));
-  }
-
-  ts.forEachChild(sourceFile, child => visit(child, ""));
-  return funcs;
-}
-
-function findFunctionNode(sourceFile: ts.SourceFile, targetName: string): ts.Node | undefined {
-  // Support Class.method syntax
-  const parts = targetName.split(".");
-  const isMethod = parts.length === 2;
-
-  let result: ts.Node | undefined;
-
-  function visit(node: ts.Node) {
-    if (result) return;
-
-    if (isMethod) {
-      const [className, methodName] = parts;
-      if (ts.isClassDeclaration(node) && node.name?.getText(sourceFile) === className) {
-        for (const member of node.members) {
-          if (ts.isConstructorDeclaration(member) && methodName === "constructor") {
-            result = member;
-            return;
-          }
-          if ((ts.isMethodDeclaration(member) || ts.isPropertyDeclaration(member)) &&
-              member.name?.getText(sourceFile) === methodName) {
-            result = member;
-            return;
-          }
-        }
-      }
-    } else {
-      if (ts.isFunctionDeclaration(node) && node.name?.getText(sourceFile) === targetName) {
-        result = node;
-        return;
-      }
-      if (ts.isVariableStatement(node)) {
-        for (const decl of node.declarationList.declarations) {
-          if (decl.name.getText(sourceFile) === targetName && isArrowOrFunctionExpr(decl)) {
-            result = node;
-            return;
-          }
-        }
-      }
-      // Check class methods without class prefix
-      if (ts.isClassDeclaration(node)) {
-        for (const member of node.members) {
-          if (ts.isMethodDeclaration(member) && member.name?.getText(sourceFile) === targetName) {
-            result = member;
-            return;
-          }
-        }
-      }
-    }
-
-    ts.forEachChild(node, visit);
-  }
-
-  ts.forEachChild(sourceFile, visit);
-  return result;
+/**
+ * The declaration a caller means by `name`.
+ *
+ * Preferring a scope that has a body is the point: taking the first name match
+ * returned an overload's bodyless signature from a tool called
+ * *get function body*.
+ */
+function findFunctionScope(
+  sourceFile: ts.SourceFile,
+  targetName: string,
+): FunctionScope | undefined {
+  const matches = findScopes(collectFunctionScopes(sourceFile), targetName);
+  return matches.find(s => s.body) ?? matches[0];
 }
 
 export function register(server: McpServer) {
@@ -184,16 +59,9 @@ export function register(server: McpServer) {
     { path: z.string().describe("Absolute path to the TS/JS file") },
     safeTool(({ path: filePath }) => `list functions in ${filePath}`, ({ path: filePath }) => {
       const sf = parseFile(filePath);
-      const funcs = collectFunctions(sf);
+      const funcs = withoutOverloadSignatures(collectFunctionScopes(sf));
       if (funcs.length === 0) return textResult(`No functions found in ${filePath}.`);
-
-      const lines: string[] = [];
-      for (const f of funcs) {
-        const exp = f.exported ? " (exported)" : "";
-        const vis = f.visibility ? `${f.visibility} ` : "";
-        lines.push(`${vis}${f.name}${f.signature}${exp} [Lines ${f.line}-${f.endLine}]`);
-      }
-      return textResult(lines.join("\n"));
+      return textResult(funcs.map(f => describe(f, sf)).join("\n"));
     }),
   );
 
@@ -206,8 +74,14 @@ export function register(server: McpServer) {
     },
     safeTool("get function body", ({ path: filePath, name }) => {
       const sf = parseFile(filePath);
-      const node = findFunctionNode(sf, name);
-      if (!node) return textResult(`Function "${name}" not found in ${filePath}.`);
+      const scope = findFunctionScope(sf, name);
+      if (!scope) return textResult(`Function "${name}" not found in ${filePath}.`);
+      // A `const f = () => ...` scope is the declarator, so that each declarator
+      // in one statement is its own scope. The source a reader wants is the
+      // whole statement, `export const` and all.
+      const node = ts.isVariableDeclaration(scope.node) && scope.node.parent?.parent
+        ? scope.node.parent.parent
+        : scope.node;
       const [line, endLine] = getLineRange(sf, node);
       const source = extractSource(sf, node);
       return textResult(`${name} [Lines ${line}-${endLine}]:\n\n${source}`);
@@ -231,17 +105,20 @@ export function register(server: McpServer) {
       const decl = findTypeNode(sf, typeName);
       if (!decl) return textResult(`Type "${typeName}" not found in ${filePath}.`);
 
-      // collectFunctions walks classes only; it feeds list_functions, where an
+      // The scope walker covers classes; it feeds list_functions, where an
       // interface member is not a function. Interfaces carry MethodSignatures.
       const lines = ts.isInterfaceDeclaration(decl)
         ? decl.members.filter(ts.isMethodSignature).map(m => {
             const params = m.parameters.map(p => p.getText(sf)).join(", ");
             const ret = m.type ? `: ${m.type.getText(sf)}` : "";
+            // `stop?(): void` printed as `stop(): void` reads as required.
+            const optional = m.questionToken ? "?" : "";
             const [line, endLine] = getLineRange(sf, m);
-            return `${typeName}.${m.name.getText(sf)}(${params})${ret} [Lines ${line}-${endLine}]`;
+            return `${typeName}.${m.name.getText(sf)}${optional}(${params})${ret} [Lines ${line}-${endLine}]`;
           })
-        : collectFunctions(sf).filter(f => f.className === typeName).map(f =>
-            `${f.visibility ? `${f.visibility} ` : ""}${f.name}${f.signature} [Lines ${f.line}-${f.endLine}]`);
+        : withoutOverloadSignatures(collectFunctionScopes(sf))
+            .filter(f => f.className === typeName)
+            .map(f => describe(f, sf, false));
 
       if (lines.length === 0) return textResult(`"${typeName}" declares no methods in ${filePath}.`);
       return textResult(lines.join("\n"));

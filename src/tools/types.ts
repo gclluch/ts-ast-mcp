@@ -77,6 +77,15 @@ interface ExportInfo {
 function collectExports(sourceFile: ts.SourceFile): ExportInfo[] {
   const exports: ExportInfo[] = [];
 
+  // An overloaded function is one exported symbol however many signatures
+  // precede it. Only the implementation has a body.
+  const implemented = new Set<string>();
+  ts.forEachChild(sourceFile, n => {
+    if (ts.isFunctionDeclaration(n) && n.name && n.body) {
+      implemented.add(n.name.getText(sourceFile));
+    }
+  });
+
   function visit(node: ts.Node) {
     // export default ...
     if (ts.isExportAssignment(node)) {
@@ -108,7 +117,13 @@ function collectExports(sourceFile: ts.SourceFile): ExportInfo[] {
     const [line] = getLineRange(sourceFile, node);
 
     if (ts.isFunctionDeclaration(node) && node.name) {
-      exports.push({ name: node.name.getText(sourceFile), kind: "function", line, isDefault: false });
+      const name = node.name.getText(sourceFile);
+      if (!node.body && implemented.has(name)) return; // an overload signature
+      exports.push({ name, kind: "function", line, isDefault: false });
+    } else if (ts.isModuleDeclaration(node) && node.body && ts.isModuleBlock(node.body)) {
+      // A namespace is an exported value like any other; omitting it entirely
+      // made `export namespace Outer` invisible to the tool that lists exports.
+      exports.push({ name: node.name.getText(sourceFile), kind: "namespace", line, isDefault: false });
     } else if (ts.isClassDeclaration(node) && node.name) {
       exports.push({ name: node.name.getText(sourceFile), kind: "class", line, isDefault: false });
     } else if (ts.isInterfaceDeclaration(node)) {
