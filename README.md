@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server for deep structural analysis of TypeScript and JavaScript source code. Unlike text-based search, this server uses the TypeScript Compiler API (`ts.createSourceFile`, `ts.createProgram`) to understand the actual structure of your code - types, functions, call relationships, interface satisfaction, and more.
 
-The TypeScript counterpart to [go-ast-mcp](https://github.com/MitekAnalytics/go-ast-mcp).
+Part of a family of AST analysis MCP servers, alongside a Go and Python counterpart.
 
 ## Features
 
@@ -95,7 +95,7 @@ Add a `.mcp.json` file to the repository root:
   "mcpServers": {
     "ts-ast": {
       "command": "npx",
-      "args": ["-y", "github:MitekAnalytics/ts-ast-mcp"]
+      "args": ["-y", "github:gclluch/ts-ast-mcp"]
     }
   }
 }
@@ -109,7 +109,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
   "mcpServers": {
     "ts-ast": {
       "command": "npx",
-      "args": ["-y", "github:MitekAnalytics/ts-ast-mcp"]
+      "args": ["-y", "github:gclluch/ts-ast-mcp"]
     }
   }
 }
@@ -123,7 +123,7 @@ Create `.vscode/mcp.json` in the project root:
   "mcpServers": {
     "ts-ast": {
       "command": "npx",
-      "args": ["-y", "github:MitekAnalytics/ts-ast-mcp"]
+      "args": ["-y", "github:gclluch/ts-ast-mcp"]
     }
   }
 }
@@ -137,7 +137,7 @@ Add to the extension's MCP settings:
   "mcpServers": {
     "ts-ast": {
       "command": "npx",
-      "args": ["-y", "github:MitekAnalytics/ts-ast-mcp"],
+      "args": ["-y", "github:gclluch/ts-ast-mcp"],
       "env": {}
     }
   }
@@ -149,7 +149,7 @@ Add to the extension's MCP settings:
 For working on ts-ast-mcp itself, clone and build locally:
 
 ```bash
-git clone https://github.com/MitekAnalytics/ts-ast-mcp.git
+git clone https://github.com/gclluch/ts-ast-mcp.git
 cd ts-ast-mcp
 npm install    # prepare script builds automatically
 ```
