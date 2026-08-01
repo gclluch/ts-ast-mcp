@@ -28,15 +28,15 @@ Companion to [py-ast-mcp](https://github.com/gclluch/py-ast-mcp), the same idea 
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `analyze_file` | High-level summary of all symbols (classes, interfaces, types, enums, functions) | `path` |
-| `list_functions` | List all functions/methods with full signatures and line ranges | `path` |
-| `get_function_body` | Extract a function/method body (supports `Class.method` syntax) | `path`, `name` |
+| `analyze_file` | High-level summary of the file's own symbols: classes, interfaces, types, enums, namespaces, functions. Class members are left to `list_methods` | `path` |
+| `list_functions` | List all functions/methods with full signatures and line ranges, including accessors (`get`/`set`), `static` members and class arrow properties | `path` |
+| `get_function_body` | Extract a function/method body (supports `Class.method` syntax). Returns the implementation, not an overload signature | `path`, `name` |
 | `list_methods` | List all methods for a class or interface | `path`, `type` |
 | `get_type_definition` | Extract any type definition (interface, type alias, class, enum) | `path`, `name` |
 | `list_declarations` | List module-level const/let/var with types | `path` |
-| `list_exports` | List all exported symbols with kind (function, class, type, re-export) | `path` |
+| `list_exports` | List all exported symbols with kind (function, class, type, namespace, re-export). An overloaded function is one symbol | `path` |
 | `list_imports` | List all import statements with bindings and module paths | `path` |
-| `find_usages` | Find all occurrences of an identifier with source context | `path`, `identifier` |
+| `find_usages` | Find all occurrences of an identifier with source context, in one file or across a directory | `path`, `identifier`, `scope`\* |
 
 ### Call Analysis
 
@@ -54,17 +54,21 @@ Companion to [py-ast-mcp](https://github.com/gclluch/py-ast-mcp), the same idea 
 \* Optional `get_callers` parameter:
 - `scope` - `file` (default) or `package` (search all files in the directory)
 
+\* Optional `find_usages` parameter:
+- `scope` - `file` (default) or `package` (search all files in the directory). Passing a
+  directory as `path` implies `package`.
+
 ### Code Quality
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
 | `code_complexity` | Cyclomatic complexity per function | `path`, `function`\* |
-| `code_smells` | Long functions, deep nesting, god classes, `any` casts, non-null assertions | `path`, `function`\* |
+| `code_smells` | Long functions, deep nesting, god classes, `as any` casts, explicit `any` annotations, non-null assertions | `path`, `function`\* |
 | `find_errors` | Floating promises, empty catches, double type assertions, optional chain + non-null | `path`, `function`\* |
 
 A floating promise here means a discarded call to a function the **same file** declares `async` (or to `fetch`). Without type resolution that is the limit of what can be claimed soundly - an imported `async` function is not detected. It under-reports on purpose: the alternative is guessing from the callee's name, which reports `map.get(k)`.
-| `dead_code` | Find unexported symbols never referenced inside their own file | `path` (directory), `include_tests`\* |
-| `find_implementations` | Find classes satisfying an interface - explicit `implements` or type-checked structural match (**semantic tier**) | `path`, `interface` |
+| `dead_code` | Find module-local symbols never referenced inside their own file: unexported declarations, plus `private` and `#name` class members | `path` (directory), `include_tests`\* |
+| `find_implementations` | Find classes satisfying an interface, labelled `explicit` / `inherited` / `structural` and marked `abstract` where it applies (**semantic tier**) | `path`, `interface` |
 
 \* Optional - omit to report all functions / exclude test files.
 
@@ -182,7 +186,28 @@ Compiler options come from the nearest `tsconfig.json`; the file list never does
 
 Cost of the semantic tier is real: the first `find_implementations` call on a directory pays a full parse-bind-check pass. Subsequent calls on an unchanged tree are cache hits.
 
-Arrow functions (`const foo = () => {}`) are detected as first-class functions throughout - they appear in `list_functions`, `get_function_body`, `code_complexity`, `code_smells`, and all other function-aware tools.
+### One walker for "what is a function"
+
+`list_functions`, `code_complexity` and `call_graph` share a single traversal
+(`src/scopes.ts`). They used to carry one each, and each knew a different subset
+of the language, so the three tools disagreed about the same file. Everything
+that owns executable code is covered in one place:
+
+| Construct | Reported as |
+|---|---|
+| `function f()`, `const f = () => {}` | `f` |
+| function nested in another | `outer.inner` - its own entry, never folded into the parent |
+| method, constructor | `Cls.method`, `Cls.constructor` |
+| `get x()` / `set x(v)` | `Cls.x`, marked `get` / `set` |
+| class arrow property `x = () => {}` | `Cls.x` |
+| `static` member | marked `static` |
+| namespace member | `Ns.fn`, `Outer.Inner.fn` |
+| object-literal method or arrow | `obj.method` |
+
+A consequence worth stating: a call written inside a nested function is
+attributed to that function, not to the one it is written in. A call inside an
+anonymous callback is attributed to the enclosing named function, because that
+callback is not a scope anyone can name.
 
 All output is plain text, not JSON.
 
