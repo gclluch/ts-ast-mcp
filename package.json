@@ -5,6 +5,11 @@
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
     "ts-ast-mcp": "dist/index.js"
   },
