@@ -87,30 +87,24 @@ export function register(server: McpServer) {
 
       if (files.length === 0) return textResult(`No TypeScript/JavaScript files found in ${dirPath}.`);
 
-      // One parse per file: collect unexported symbols and identifier counts
-      // together. Re-parsing per symbol below turned this into O(symbols x files).
-      const allSymbols: UnexportedSymbol[] = [];
-      const countsByFile = new Map<string, Map<string, number>>();
-
+      // These symbols are unexported, so they are module-local by definition and
+      // no other file can reference them. An earlier version also scanned every
+      // other file for the bare name and treated a hit as a use, which is not a
+      // weaker check but a wrong one: it silenced any symbol sharing a name with
+      // an identifier anywhere in the tree, so anything called `id`, `config`,
+      // `parse` or `visit` was permanently immune.
+      //
+      // Dead = named at most once in its own file, that once being the declaration.
+      // ponytail: a same-named local in another scope of the same file still reads
+      // as a use. Under-reports, never over-reports; needs symbol identity from
+      // the checker to close, which costs a full Program for every directory.
+      const dead: UnexportedSymbol[] = [];
       for (const file of files) {
         const sf = parseFile(file);
-        allSymbols.push(...collectUnexportedSymbols(sf, file));
-        countsByFile.set(file, countIdentifiers(sf));
-      }
-
-      // Dead = never named in another file, and named at most once in its own
-      // file (that one occurrence being its declaration).
-      const dead: UnexportedSymbol[] = [];
-      for (const sym of allSymbols) {
-        let usedElsewhere = false;
-        for (const [file, counts] of countsByFile) {
-          if (file === sym.file) continue;
-          if (counts.has(sym.name)) { usedElsewhere = true; break; }
+        const counts = countIdentifiers(sf);
+        for (const sym of collectUnexportedSymbols(sf, file)) {
+          if ((counts.get(sym.name) ?? 0) <= 1) dead.push(sym);
         }
-        if (usedElsewhere) continue;
-
-        const selfRefs = countsByFile.get(sym.file)?.get(sym.name) ?? 0;
-        if (selfRefs <= 1) dead.push(sym);
       }
 
       if (dead.length === 0) return textResult(`No dead code found in ${dirPath}.`);
