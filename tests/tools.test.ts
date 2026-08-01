@@ -9,6 +9,7 @@ import ts from "typescript";
 const HERE = path.dirname(url.fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, "fixtures");
 const SHAPES = path.join(FIXTURES, "shapes.ts");
+const SIBLING = path.join(FIXTURES, "sibling.ts");
 const DIST = path.join(HERE, "..", "dist", "index.js");
 
 // ── unit: the two root causes behind the bugs this suite guards ──────────
@@ -168,10 +169,80 @@ describe("tools over stdio", () => {
     expect(out).not.toContain("{ alpha, beta }");
   });
 
+  it.each([
+    ["column past end of a blank line", { line: 6, column: 10 }],
+    ["line past end of file", { line: 999, column: 1 }],
+    ["zero/negative position", { line: 0, column: 0 }],
+  ])("find_node_at_position handles %s", async (_label, pos) => {
+    // These leaked raw TypeScript internals: "Debug Failure. False expression."
+    // and "Debug Failure. Bad line number."
+    const out = await server.call("find_node_at_position", { path: SHAPES, ...pos });
+    expect(out).not.toMatch(/Debug Failure/);
+    expect(out).toMatch(/No AST node found/);
+  });
+
   it("reports a missing file as an error, not a crash", async () => {
     const out = await server.call("analyze_file", { path: "/no/such/file.ts" });
     expect(out).toMatch(/Failed|ENOENT/);
     // server must still be alive
+    const r = await server.request("tools/list", {});
+    expect(r.result.tools).toHaveLength(20);
+  });
+});
+
+// ── every tool, happy path and failure path ─────────────────────────────
+//
+// Covers all 20 registrations so the shared error wrapper can be changed with
+// confidence: each tool must produce real output for good input, and a
+// "Failed to ..." string (never a crash) for a path that does not exist.
+
+const MISSING = "/no/such/dir/file.ts";
+
+const ALL_TOOLS: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+  ["analyze_file",           { path: SHAPES }, { path: MISSING }],
+  ["analyze_package",        { path: FIXTURES }, { path: "/no/such/dir" }],
+  ["list_functions",         { path: SHAPES }, { path: MISSING }],
+  ["get_function_body",      { path: SHAPES, name: "entry" }, { path: MISSING, name: "entry" }],
+  ["list_methods",           { path: SHAPES, type: "LoudGreeter" }, { path: MISSING, type: "X" }],
+  ["get_type_definition",    { path: SHAPES, name: "Greeter" }, { path: MISSING, name: "X" }],
+  ["list_declarations",      { path: SHAPES }, { path: MISSING }],
+  ["list_exports",           { path: SHAPES }, { path: MISSING }],
+  ["list_imports",           { path: SIBLING }, { path: MISSING }],
+  ["find_usages",            { path: SHAPES, identifier: "entry" }, { path: MISSING, identifier: "x" }],
+  ["call_graph",             { path: SHAPES }, { path: MISSING }],
+  ["get_callers",            { path: SHAPES, function: "usedHelper" }, { path: MISSING, function: "x" }],
+  ["code_complexity",        { path: SHAPES }, { path: MISSING }],
+  ["code_smells",            { path: SHAPES }, { path: MISSING }],
+  ["find_errors",            { path: SHAPES }, { path: MISSING }],
+  ["dead_code",              { path: FIXTURES }, { path: "/no/such/dir" }],
+  ["find_implementations",   { path: SHAPES, interface: "Greeter" }, { path: MISSING, interface: "X" }],
+  ["get_doc",                { path: SHAPES, name: "entry" }, { path: MISSING, name: "x" }],
+  ["diff_ast",               { old_path: SHAPES, new_path: SIBLING }, { old_path: MISSING, new_path: MISSING }],
+  ["find_node_at_position",  { path: SHAPES, line: 7, column: 14 }, { path: MISSING, line: 1, column: 1 }],
+];
+
+describe("every tool", () => {
+  let server: Server;
+  beforeAll(async () => { server = new Server(); await server.start(); }, 30_000);
+  afterAll(() => server?.stop());
+
+  it("the table covers every registered tool", async () => {
+    const r = await server.request("tools/list", {});
+    const registered = new Set(r.result.tools.map((t: any) => t.name));
+    const covered = new Set(ALL_TOOLS.map(([n]) => n));
+    expect([...registered].sort()).toEqual([...covered].sort());
+  });
+
+  it.each(ALL_TOOLS)("%s returns output for valid input", async (name, good) => {
+    const out = await server.call(name, good);
+    expect(out.trim()).not.toBe("");
+    expect(out).not.toMatch(/^Failed to /);
+  });
+
+  it.each(ALL_TOOLS)("%s reports failure without crashing", async (name, _good, bad) => {
+    const out = await server.call(name, bad);
+    expect(out).toMatch(/^Failed to /);
+    // and the process is still serving
     const r = await server.request("tools/list", {});
     expect(r.result.tools).toHaveLength(20);
   });

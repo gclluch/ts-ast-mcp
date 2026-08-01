@@ -2,7 +2,7 @@ import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, getLineRange } from "../parse.js";
-import { textResult, errorResult } from "../format.js";
+import { textResult, safeTool } from "../format.js";
 
 interface UsageInfo {
   line: number;
@@ -63,7 +63,16 @@ function findUsages(sourceFile: ts.SourceFile, identifier: string): UsageInfo[] 
 }
 
 function findNodeAtPosition(sourceFile: ts.SourceFile, line: number, column: number): ts.Node | undefined {
-  const position = sourceFile.getPositionOfLineAndCharacter(line - 1, column - 1);
+  // getPositionOfLineAndCharacter asserts internally on an out-of-range line or
+  // column, surfacing a raw "Debug Failure" instead of a usable message. Clamp
+  // to the file's own bounds first and let the caller report "no node here".
+  const starts = sourceFile.getLineStarts();
+  const lineIndex = line - 1;
+  if (lineIndex < 0 || lineIndex >= starts.length) return undefined;
+
+  const lineStart = starts[lineIndex];
+  const lineEnd = lineIndex + 1 < starts.length ? starts[lineIndex + 1] : sourceFile.end;
+  const position = Math.min(lineStart + Math.max(column - 1, 0), Math.max(lineEnd - 1, lineStart));
 
   function visit(node: ts.Node): ts.Node | undefined {
     if (node.getStart(sourceFile) <= position && position < node.getEnd()) {
@@ -94,21 +103,17 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the TS/JS file"),
       identifier: z.string().describe("The name of the identifier to search for"),
     },
-    async ({ path: filePath, identifier }) => {
-      try {
-        const sf = parseFile(filePath);
-        const usages = findUsages(sf, identifier);
-        if (usages.length === 0) return textResult(`No usages of "${identifier}" found in ${filePath}.`);
+    safeTool("find usages", ({ path: filePath, identifier }) => {
+      const sf = parseFile(filePath);
+      const usages = findUsages(sf, identifier);
+      if (usages.length === 0) return textResult(`No usages of "${identifier}" found in ${filePath}.`);
 
-        const lines: string[] = [`Usages of "${identifier}" in ${filePath} (${usages.length} found):`, ""];
-        for (const u of usages) {
-          lines.push(`  Line ${u.line}, Col ${u.column} [${u.kind}]: ${u.context}`);
-        }
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to find usages: ${(e as Error).message}`);
+      const lines: string[] = [`Usages of "${identifier}" in ${filePath} (${usages.length} found):`, ""];
+      for (const u of usages) {
+        lines.push(`  Line ${u.line}, Col ${u.column} [${u.kind}]: ${u.context}`);
       }
-    },
+      return textResult(lines.join("\n"));
+    }),
   );
 
   server.tool(
@@ -119,28 +124,24 @@ export function register(server: McpServer) {
       line: z.number().describe("Line number (1-based)"),
       column: z.number().describe("Column number (1-based)"),
     },
-    async ({ path: filePath, line, column }) => {
-      try {
-        const sf = parseFile(filePath);
-        const node = findNodeAtPosition(sf, line, column);
-        if (!node) return textResult(`No AST node found at ${line}:${column} in ${filePath}.`);
+    safeTool("find node at position", ({ path: filePath, line, column }) => {
+      const sf = parseFile(filePath);
+      const node = findNodeAtPosition(sf, line, column);
+      if (!node) return textResult(`No AST node found at ${line}:${column} in ${filePath}.`);
 
-        const [startLine, endLine] = getLineRange(sf, node);
-        const kindName = ts.SyntaxKind[node.kind];
-        const text = node.getText(sf).substring(0, 200);
-        const parentKind = node.parent ? ts.SyntaxKind[node.parent.kind] : "none";
+      const [startLine, endLine] = getLineRange(sf, node);
+      const kindName = ts.SyntaxKind[node.kind];
+      const text = node.getText(sf).substring(0, 200);
+      const parentKind = node.parent ? ts.SyntaxKind[node.parent.kind] : "none";
 
-        const lines = [
-          `Node at ${line}:${column} in ${filePath}:`,
-          `  Kind: ${kindName}`,
-          `  Parent: ${parentKind}`,
-          `  Lines: ${startLine}-${endLine}`,
-          `  Text: ${text}${text.length >= 200 ? "..." : ""}`,
-        ];
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to find node at position: ${(e as Error).message}`);
-      }
-    },
+      const lines = [
+        `Node at ${line}:${column} in ${filePath}:`,
+        `  Kind: ${kindName}`,
+        `  Parent: ${parentKind}`,
+        `  Lines: ${startLine}-${endLine}`,
+        `  Text: ${text}${text.length >= 200 ? "..." : ""}`,
+      ];
+      return textResult(lines.join("\n"));
+    }),
   );
 }

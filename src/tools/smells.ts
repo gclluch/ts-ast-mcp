@@ -2,7 +2,7 @@ import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, getLineRange, isArrowOrFunctionExpr } from "../parse.js";
-import { type Smell, formatSmells, textResult, errorResult } from "../format.js";
+import { type Smell, formatSmells, textResult, safeTool } from "../format.js";
 
 const LONG_FUNCTION_LINES = 50;
 const MANY_PARAMS = 5;
@@ -153,14 +153,10 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the TS/JS file"),
       function: z.string().optional().describe("Scope analysis to a specific function"),
     },
-    async ({ path: filePath, function: targetFunction }) => {
-      try {
-        const sf = parseFile(filePath);
-        const smells = detectSmells(sf, targetFunction);
-        return textResult(formatSmells(smells, filePath));
-      } catch (e) {
-        return errorResult(`Failed to detect code smells: ${(e as Error).message}`);
-      }
-    },
+    safeTool("detect code smells", ({ path: filePath, function: targetFunction }) => {
+      const sf = parseFile(filePath);
+      const smells = detectSmells(sf, targetFunction);
+      return textResult(formatSmells(smells, filePath));
+    }),
   );
 }

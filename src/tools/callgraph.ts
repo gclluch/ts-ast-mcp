@@ -4,7 +4,7 @@ import path from "node:path";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, isArrowOrFunctionExpr, listTsFiles } from "../parse.js";
-import { textResult, errorResult } from "../format.js";
+import { textResult, safeTool } from "../format.js";
 
 interface CallEdge {
   caller: string;
@@ -171,17 +171,13 @@ export function register(server: McpServer) {
       direction: z.enum(["TD", "LR"]).optional().default("TD").describe("Graph direction: TD (top-down) or LR (left-right)"),
       scope: z.enum(["file", "package"]).optional().default("file").describe("Analysis scope: 'file' or 'package'"),
     },
-    async ({ path: filePath, function: focusFunction, include_external, direction, scope }) => {
-      try {
-        const opts = { focusFunction, includeExternal: include_external };
-        const { edges } = scope === "package"
-          ? collectPackageCallEdges(filePath, opts)
-          : collectCallEdges(parseFile(filePath), opts);
-        return textResult(toMermaid(edges, direction));
-      } catch (e) {
-        return errorResult(`Failed to generate call graph: ${(e as Error).message}`);
-      }
-    },
+    safeTool("generate call graph", ({ path: filePath, function: focusFunction, include_external, direction, scope }) => {
+      const opts = { focusFunction, includeExternal: include_external };
+      const { edges } = scope === "package"
+        ? collectPackageCallEdges(filePath, opts)
+        : collectCallEdges(parseFile(filePath), opts);
+      return textResult(toMermaid(edges, direction));
+    }),
   );
 
   server.tool(
@@ -192,27 +188,23 @@ export function register(server: McpServer) {
       function: z.string().describe("Name of the target function (e.g., 'setup' or 'MyClass.method')"),
       scope: z.enum(["file", "package"]).optional().default("file").describe("Analysis scope: 'file' or 'package'"),
     },
-    async ({ path: filePath, function: targetFunction, scope }) => {
-      try {
-        const { edges } = scope === "package"
-          ? collectPackageCallEdges(filePath, { includeExternal: true })
-          : collectCallEdges(parseFile(filePath), { includeExternal: true });
+    safeTool("find callers", ({ path: filePath, function: targetFunction, scope }) => {
+      const { edges } = scope === "package"
+        ? collectPackageCallEdges(filePath, { includeExternal: true })
+        : collectCallEdges(parseFile(filePath), { includeExternal: true });
 
-        const callers = edges
-          .filter(e => e.callee === targetFunction || e.callee.endsWith(`.${targetFunction}`))
-          .map(e => e.caller);
+      const callers = edges
+        .filter(e => e.callee === targetFunction || e.callee.endsWith(`.${targetFunction}`))
+        .map(e => e.caller);
 
-        if (callers.length === 0) return textResult(`No callers found for "${targetFunction}".`);
+      if (callers.length === 0) return textResult(`No callers found for "${targetFunction}".`);
 
-        const unique = [...new Set(callers)];
-        const lines = [`Callers of "${targetFunction}" (${unique.length} found):`, ""];
-        for (const c of unique) {
-          lines.push(`  ${c}`);
-        }
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to find callers: ${(e as Error).message}`);
+      const unique = [...new Set(callers)];
+      const lines = [`Callers of "${targetFunction}" (${unique.length} found):`, ""];
+      for (const c of unique) {
+        lines.push(`  ${c}`);
       }
-    },
+      return textResult(lines.join("\n"));
+    }),
   );
 }

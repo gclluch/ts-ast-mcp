@@ -2,7 +2,7 @@ import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, getLineRange } from "../parse.js";
-import { type ErrorFinding, formatErrors, textResult, errorResult } from "../format.js";
+import { type ErrorFinding, formatErrors, textResult, safeTool } from "../format.js";
 
 function detectErrors(sourceFile: ts.SourceFile, targetFunction?: string): ErrorFinding[] {
   const errors: ErrorFinding[] = [];
@@ -122,14 +122,10 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the TS/JS file"),
       function: z.string().optional().describe("Scope analysis to a specific function"),
     },
-    async ({ path: filePath, function: targetFunction }) => {
-      try {
-        const sf = parseFile(filePath);
-        const findings = detectErrors(sf, targetFunction);
-        return textResult(formatErrors(findings, filePath));
-      } catch (e) {
-        return errorResult(`Failed to find errors: ${(e as Error).message}`);
-      }
-    },
+    safeTool("find errors", ({ path: filePath, function: targetFunction }) => {
+      const sf = parseFile(filePath);
+      const findings = detectErrors(sf, targetFunction);
+      return textResult(formatErrors(findings, filePath));
+    }),
   );
 }

@@ -2,7 +2,7 @@ import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile } from "../parse.js";
-import { textResult, errorResult } from "../format.js";
+import { textResult, safeTool } from "../format.js";
 
 function findSymbolNode(sourceFile: ts.SourceFile, targetName: string): ts.Node | undefined {
   const parts = targetName.split(".");
@@ -82,19 +82,15 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the TS/JS file"),
       name: z.string().describe("Symbol name (e.g., 'Config', 'MyClass.method', 'DEFAULT_VALUE')"),
     },
-    async ({ path: filePath, name }) => {
-      try {
-        const sf = parseFile(filePath);
-        const node = findSymbolNode(sf, name);
-        if (!node) return textResult(`Symbol "${name}" not found in ${filePath}.`);
+    safeTool("get documentation", ({ path: filePath, name }) => {
+      const sf = parseFile(filePath);
+      const node = findSymbolNode(sf, name);
+      if (!node) return textResult(`Symbol "${name}" not found in ${filePath}.`);
 
-        const doc = extractJSDoc(sf, node);
-        if (!doc) return textResult(`No documentation found for "${name}" in ${filePath}.`);
+      const doc = extractJSDoc(sf, node);
+      if (!doc) return textResult(`No documentation found for "${name}" in ${filePath}.`);
 
-        return textResult(`Documentation for ${name}:\n\n${doc}`);
-      } catch (e) {
-        return errorResult(`Failed to get documentation: ${(e as Error).message}`);
-      }
-    },
+      return textResult(`Documentation for ${name}:\n\n${doc}`);
+    }),
   );
 }

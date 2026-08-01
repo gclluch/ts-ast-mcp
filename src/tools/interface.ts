@@ -3,7 +3,7 @@ import path from "node:path";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, getLineRange, listTsFiles } from "../parse.js";
-import { textResult, errorResult } from "../format.js";
+import { textResult, safeTool } from "../format.js";
 
 interface InterfaceInfo {
   name: string;
@@ -115,46 +115,42 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the file or directory to search"),
       interface: z.string().describe("Name of the interface to check against"),
     },
-    async ({ path: targetPath, interface: interfaceName }) => {
-      try {
-        // listTsFiles resolves a file to itself and a directory to its tree,
-        // so both cases are the same list from here on.
-        const files = listTsFiles(targetPath, true);
-        const isFile = files.length === 1 && files[0] === path.resolve(targetPath);
+    safeTool("find implementations", ({ path: targetPath, interface: interfaceName }) => {
+      // listTsFiles resolves a file to itself and a directory to its tree,
+      // so both cases are the same list from here on.
+      const files = listTsFiles(targetPath, true);
+      const isFile = files.length === 1 && files[0] === path.resolve(targetPath);
 
-        let iface: InterfaceInfo | undefined;
-        for (const file of files) {
-          const sf = parseFile(file);
-          iface = extractInterfaceInfo(sf, interfaceName);
-          if (iface) break;
-        }
-
-        if (!iface) return textResult(`Interface "${interfaceName}" not found.`);
-
-        // Collect all classes and check which implement the interface
-        const allClasses: ClassInfo[] = [];
-        for (const file of files) {
-          const sf = parseFile(file);
-          allClasses.push(...collectClasses(sf, file));
-        }
-
-        const implementations = allClasses.filter(cls => classImplementsInterface(cls, iface!));
-
-        if (implementations.length === 0) {
-          return textResult(`No classes implementing "${interfaceName}" found.`);
-        }
-
-        const baseDir = isFile ? path.dirname(targetPath) : targetPath;
-        const lines = [`Classes implementing "${interfaceName}" (${implementations.length} found):`, ""];
-        for (const impl of implementations) {
-          const rel = path.relative(baseDir, impl.file);
-          const explicit = impl.implements.includes(interfaceName) ? " (explicit)" : " (structural)";
-          lines.push(`  ${impl.name}${explicit} [${rel}:${impl.line}]`);
-        }
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to find implementations: ${(e as Error).message}`);
+      let iface: InterfaceInfo | undefined;
+      for (const file of files) {
+        const sf = parseFile(file);
+        iface = extractInterfaceInfo(sf, interfaceName);
+        if (iface) break;
       }
-    },
+
+      if (!iface) return textResult(`Interface "${interfaceName}" not found.`);
+
+      // Collect all classes and check which implement the interface
+      const allClasses: ClassInfo[] = [];
+      for (const file of files) {
+        const sf = parseFile(file);
+        allClasses.push(...collectClasses(sf, file));
+      }
+
+      const implementations = allClasses.filter(cls => classImplementsInterface(cls, iface!));
+
+      if (implementations.length === 0) {
+        return textResult(`No classes implementing "${interfaceName}" found.`);
+      }
+
+      const baseDir = isFile ? path.dirname(targetPath) : targetPath;
+      const lines = [`Classes implementing "${interfaceName}" (${implementations.length} found):`, ""];
+      for (const impl of implementations) {
+        const rel = path.relative(baseDir, impl.file);
+        const explicit = impl.implements.includes(interfaceName) ? " (explicit)" : " (structural)";
+        lines.push(`  ${impl.name}${explicit} [${rel}:${impl.line}]`);
+      }
+      return textResult(lines.join("\n"));
+    }),
   );
 }

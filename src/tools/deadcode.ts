@@ -3,7 +3,7 @@ import path from "node:path";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, isExported, isArrowOrFunctionExpr, listTsFiles, getLineRange, bindingNames } from "../parse.js";
-import { textResult, errorResult } from "../format.js";
+import { textResult, safeTool } from "../format.js";
 
 interface UnexportedSymbol {
   name: string;
@@ -79,52 +79,48 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the directory"),
       include_tests: z.boolean().optional().default(false).describe("Include test files (default: false)"),
     },
-    async ({ path: dirPath, include_tests }) => {
-      try {
-        let files = listTsFiles(dirPath, true);
-        if (!include_tests) {
-          files = files.filter(f => !f.includes(".test.") && !f.includes(".spec.") && !f.includes("__tests__"));
-        }
-
-        if (files.length === 0) return textResult(`No TypeScript/JavaScript files found in ${dirPath}.`);
-
-        // One parse per file: collect unexported symbols and identifier counts
-        // together. Re-parsing per symbol below turned this into O(symbols x files).
-        const allSymbols: UnexportedSymbol[] = [];
-        const countsByFile = new Map<string, Map<string, number>>();
-
-        for (const file of files) {
-          const sf = parseFile(file);
-          allSymbols.push(...collectUnexportedSymbols(sf, file));
-          countsByFile.set(file, countIdentifiers(sf));
-        }
-
-        // Dead = never named in another file, and named at most once in its own
-        // file (that one occurrence being its declaration).
-        const dead: UnexportedSymbol[] = [];
-        for (const sym of allSymbols) {
-          let usedElsewhere = false;
-          for (const [file, counts] of countsByFile) {
-            if (file === sym.file) continue;
-            if (counts.has(sym.name)) { usedElsewhere = true; break; }
-          }
-          if (usedElsewhere) continue;
-
-          const selfRefs = countsByFile.get(sym.file)?.get(sym.name) ?? 0;
-          if (selfRefs <= 1) dead.push(sym);
-        }
-
-        if (dead.length === 0) return textResult(`No dead code found in ${dirPath}.`);
-
-        const lines = [`Dead code in ${dirPath} (${dead.length} unreferenced symbols):`, ""];
-        for (const d of dead) {
-          const rel = path.relative(dirPath, d.file);
-          lines.push(`  ${d.kind} ${d.name} [${rel}:${d.line}]`);
-        }
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to find dead code: ${(e as Error).message}`);
+    safeTool("find dead code", ({ path: dirPath, include_tests }) => {
+      let files = listTsFiles(dirPath, true);
+      if (!include_tests) {
+        files = files.filter(f => !f.includes(".test.") && !f.includes(".spec.") && !f.includes("__tests__"));
       }
-    },
+
+      if (files.length === 0) return textResult(`No TypeScript/JavaScript files found in ${dirPath}.`);
+
+      // One parse per file: collect unexported symbols and identifier counts
+      // together. Re-parsing per symbol below turned this into O(symbols x files).
+      const allSymbols: UnexportedSymbol[] = [];
+      const countsByFile = new Map<string, Map<string, number>>();
+
+      for (const file of files) {
+        const sf = parseFile(file);
+        allSymbols.push(...collectUnexportedSymbols(sf, file));
+        countsByFile.set(file, countIdentifiers(sf));
+      }
+
+      // Dead = never named in another file, and named at most once in its own
+      // file (that one occurrence being its declaration).
+      const dead: UnexportedSymbol[] = [];
+      for (const sym of allSymbols) {
+        let usedElsewhere = false;
+        for (const [file, counts] of countsByFile) {
+          if (file === sym.file) continue;
+          if (counts.has(sym.name)) { usedElsewhere = true; break; }
+        }
+        if (usedElsewhere) continue;
+
+        const selfRefs = countsByFile.get(sym.file)?.get(sym.name) ?? 0;
+        if (selfRefs <= 1) dead.push(sym);
+      }
+
+      if (dead.length === 0) return textResult(`No dead code found in ${dirPath}.`);
+
+      const lines = [`Dead code in ${dirPath} (${dead.length} unreferenced symbols):`, ""];
+      for (const d of dead) {
+        const rel = path.relative(dirPath, d.file);
+        lines.push(`  ${d.kind} ${d.name} [${rel}:${d.line}]`);
+      }
+      return textResult(lines.join("\n"));
+    }),
   );
 }

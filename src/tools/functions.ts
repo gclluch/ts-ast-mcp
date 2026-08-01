@@ -2,7 +2,7 @@ import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, extractSource, getLineRange, isExported, isArrowOrFunctionExpr, getVisibility } from "../parse.js";
-import { textResult, errorResult } from "../format.js";
+import { textResult, safeTool } from "../format.js";
 
 interface FuncInfo {
   name: string;
@@ -167,23 +167,19 @@ export function register(server: McpServer) {
     "list_functions",
     "Lists all functions and methods in a TypeScript/JavaScript file with their signatures and line ranges",
     { path: z.string().describe("Absolute path to the TS/JS file") },
-    async ({ path: filePath }) => {
-      try {
-        const sf = parseFile(filePath);
-        const funcs = collectFunctions(sf);
-        if (funcs.length === 0) return textResult(`No functions found in ${filePath}.`);
+    safeTool(({ path: filePath }) => `list functions in ${filePath}`, ({ path: filePath }) => {
+      const sf = parseFile(filePath);
+      const funcs = collectFunctions(sf);
+      if (funcs.length === 0) return textResult(`No functions found in ${filePath}.`);
 
-        const lines: string[] = [];
-        for (const f of funcs) {
-          const exp = f.exported ? " (exported)" : "";
-          const vis = f.visibility ? `${f.visibility} ` : "";
-          lines.push(`${vis}${f.name}${f.signature}${exp} [Lines ${f.line}-${f.endLine}]`);
-        }
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to list functions in ${filePath}: ${(e as Error).message}`);
+      const lines: string[] = [];
+      for (const f of funcs) {
+        const exp = f.exported ? " (exported)" : "";
+        const vis = f.visibility ? `${f.visibility} ` : "";
+        lines.push(`${vis}${f.name}${f.signature}${exp} [Lines ${f.line}-${f.endLine}]`);
       }
-    },
+      return textResult(lines.join("\n"));
+    }),
   );
 
   server.tool(
@@ -193,18 +189,14 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the TS/JS file"),
       name: z.string().describe("Function name (e.g., 'setup' or 'MyClass.method')"),
     },
-    async ({ path: filePath, name }) => {
-      try {
-        const sf = parseFile(filePath);
-        const node = findFunctionNode(sf, name);
-        if (!node) return textResult(`Function "${name}" not found in ${filePath}.`);
-        const [line, endLine] = getLineRange(sf, node);
-        const source = extractSource(sf, node);
-        return textResult(`${name} [Lines ${line}-${endLine}]:\n\n${source}`);
-      } catch (e) {
-        return errorResult(`Failed to get function body: ${(e as Error).message}`);
-      }
-    },
+    safeTool("get function body", ({ path: filePath, name }) => {
+      const sf = parseFile(filePath);
+      const node = findFunctionNode(sf, name);
+      if (!node) return textResult(`Function "${name}" not found in ${filePath}.`);
+      const [line, endLine] = getLineRange(sf, node);
+      const source = extractSource(sf, node);
+      return textResult(`${name} [Lines ${line}-${endLine}]:\n\n${source}`);
+    }),
   );
 
   server.tool(
@@ -214,21 +206,17 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the TS/JS file"),
       type: z.string().describe("The class name"),
     },
-    async ({ path: filePath, type: className }) => {
-      try {
-        const sf = parseFile(filePath);
-        const funcs = collectFunctions(sf).filter(f => f.className === className);
-        if (funcs.length === 0) return textResult(`No methods found for class "${className}" in ${filePath}.`);
+    safeTool("list methods", ({ path: filePath, type: className }) => {
+      const sf = parseFile(filePath);
+      const funcs = collectFunctions(sf).filter(f => f.className === className);
+      if (funcs.length === 0) return textResult(`No methods found for class "${className}" in ${filePath}.`);
 
-        const lines: string[] = [];
-        for (const f of funcs) {
-          const vis = f.visibility ? `${f.visibility} ` : "";
-          lines.push(`${vis}${f.name}${f.signature} [Lines ${f.line}-${f.endLine}]`);
-        }
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to list methods: ${(e as Error).message}`);
+      const lines: string[] = [];
+      for (const f of funcs) {
+        const vis = f.visibility ? `${f.visibility} ` : "";
+        lines.push(`${vis}${f.name}${f.signature} [Lines ${f.line}-${f.endLine}]`);
       }
-    },
+      return textResult(lines.join("\n"));
+    }),
   );
 }

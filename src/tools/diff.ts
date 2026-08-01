@@ -2,7 +2,7 @@ import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, extractSource, isExported, isArrowOrFunctionExpr } from "../parse.js";
-import { type DiffEntry, formatDiff, textResult, errorResult } from "../format.js";
+import { type DiffEntry, formatDiff, textResult, safeTool } from "../format.js";
 
 interface SymbolInfo {
   name: string;
@@ -108,17 +108,13 @@ export function register(server: McpServer) {
       old_path: z.string().describe("Absolute path to the old version of the file"),
       new_path: z.string().describe("Absolute path to the new version of the file"),
     },
-    async ({ old_path, new_path }) => {
-      try {
-        const oldSf = parseFile(old_path);
-        const newSf = parseFile(new_path);
-        const oldSymbols = collectAllSymbols(oldSf);
-        const newSymbols = collectAllSymbols(newSf);
-        const entries = diffSymbols(oldSymbols, newSymbols);
-        return textResult(formatDiff(entries, old_path, new_path));
-      } catch (e) {
-        return errorResult(`Failed to diff files: ${(e as Error).message}`);
-      }
-    },
+    safeTool("diff files", ({ old_path, new_path }) => {
+      const oldSf = parseFile(old_path);
+      const newSf = parseFile(new_path);
+      const oldSymbols = collectAllSymbols(oldSf);
+      const newSymbols = collectAllSymbols(newSf);
+      const entries = diffSymbols(oldSymbols, newSymbols);
+      return textResult(formatDiff(entries, old_path, new_path));
+    }),
   );
 }

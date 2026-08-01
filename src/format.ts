@@ -41,6 +41,28 @@ export function errorResult(message: string) {
   return { isError: true, content: [{ type: "text" as const, text: message }] };
 }
 
+/**
+ * Wraps a tool handler so a thrown error becomes a readable result instead of
+ * killing the request. Every tool needs this, so it lives here once rather than
+ * as a try/catch in each of them.
+ *
+ * `label` completes the sentence "Failed to ...", and may be a function when the
+ * message should mention an argument.
+ */
+export function safeTool<A, R>(
+  label: string | ((args: A) => string),
+  handler: (args: A) => R,
+) {
+  return async (args: A) => {
+    try {
+      return handler(args);
+    } catch (e) {
+      const what = typeof label === "function" ? label(args) : label;
+      return errorResult(`Failed to ${what}: ${(e as Error).message}`);
+    }
+  };
+}
+
 // ── Formatters ──────────────────────────────────────────────────────────
 
 export function formatSymbols(symbols: FileSymbol[], filePath?: string): string {

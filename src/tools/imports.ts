@@ -2,7 +2,7 @@ import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, getLineRange } from "../parse.js";
-import { textResult, errorResult } from "../format.js";
+import { textResult, safeTool } from "../format.js";
 
 interface ImportInfo {
   module: string;
@@ -72,21 +72,17 @@ export function register(server: McpServer) {
     "list_imports",
     "Lists all import statements in a TypeScript/JavaScript file with their bindings and module paths",
     { path: z.string().describe("Absolute path to the TS/JS file") },
-    async ({ path: filePath }) => {
-      try {
-        const sf = parseFile(filePath);
-        const imps = collectImports(sf);
-        if (imps.length === 0) return textResult(`No imports found in ${filePath}.`);
+    safeTool("list imports", ({ path: filePath }) => {
+      const sf = parseFile(filePath);
+      const imps = collectImports(sf);
+      if (imps.length === 0) return textResult(`No imports found in ${filePath}.`);
 
-        const lines: string[] = [];
-        for (const i of imps) {
-          const bindingStr = i.bindings.length > 0 ? `{ ${i.bindings.join(", ")} }` : "(side-effect)";
-          lines.push(`[${i.kind}] ${bindingStr} from "${i.module}" [line ${i.line}]`);
-        }
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to list imports: ${(e as Error).message}`);
+      const lines: string[] = [];
+      for (const i of imps) {
+        const bindingStr = i.bindings.length > 0 ? `{ ${i.bindings.join(", ")} }` : "(side-effect)";
+        lines.push(`[${i.kind}] ${bindingStr} from "${i.module}" [line ${i.line}]`);
       }
-    },
+      return textResult(lines.join("\n"));
+    }),
   );
 }

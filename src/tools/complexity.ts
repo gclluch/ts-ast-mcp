@@ -2,7 +2,7 @@ import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, getLineRange, isArrowOrFunctionExpr } from "../parse.js";
-import { type ComplexityResult, formatComplexity, textResult, errorResult } from "../format.js";
+import { type ComplexityResult, formatComplexity, textResult, safeTool } from "../format.js";
 
 function computeComplexity(node: ts.Node): number {
   let complexity = 1; // base path
@@ -91,14 +91,10 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the TS/JS file"),
       function: z.string().optional().describe("Compute only for this function (omit for all)"),
     },
-    async ({ path: filePath, function: targetFunction }) => {
-      try {
-        const sf = parseFile(filePath);
-        const results = collectComplexity(sf, targetFunction);
-        return textResult(formatComplexity(results, filePath));
-      } catch (e) {
-        return errorResult(`Failed to compute complexity: ${(e as Error).message}`);
-      }
-    },
+    safeTool("compute complexity", ({ path: filePath, function: targetFunction }) => {
+      const sf = parseFile(filePath);
+      const results = collectComplexity(sf, targetFunction);
+      return textResult(formatComplexity(results, filePath));
+    }),
   );
 }

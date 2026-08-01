@@ -2,7 +2,7 @@ import ts from "typescript";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, extractSource, getLineRange, isExported, bindingNames } from "../parse.js";
-import { textResult, errorResult } from "../format.js";
+import { textResult, safeTool } from "../format.js";
 
 function findTypeNode(sourceFile: ts.SourceFile, targetName: string): ts.Node | undefined {
   let result: ts.Node | undefined;
@@ -135,61 +135,49 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the TS/JS file"),
       name: z.string().describe("Name of the type to extract"),
     },
-    async ({ path: filePath, name }) => {
-      try {
-        const sf = parseFile(filePath);
-        const node = findTypeNode(sf, name);
-        if (!node) return textResult(`Type "${name}" not found in ${filePath}.`);
-        const [line, endLine] = getLineRange(sf, node);
-        const source = extractSource(sf, node);
-        return textResult(`${name} [Lines ${line}-${endLine}]:\n\n${source}`);
-      } catch (e) {
-        return errorResult(`Failed to get type definition: ${(e as Error).message}`);
-      }
-    },
+    safeTool("get type definition", ({ path: filePath, name }) => {
+      const sf = parseFile(filePath);
+      const node = findTypeNode(sf, name);
+      if (!node) return textResult(`Type "${name}" not found in ${filePath}.`);
+      const [line, endLine] = getLineRange(sf, node);
+      const source = extractSource(sf, node);
+      return textResult(`${name} [Lines ${line}-${endLine}]:\n\n${source}`);
+    }),
   );
 
   server.tool(
     "list_declarations",
     "Lists package-level constant and variable declarations in a TypeScript/JavaScript file",
     { path: z.string().describe("Absolute path to the TS/JS file") },
-    async ({ path: filePath }) => {
-      try {
-        const sf = parseFile(filePath);
-        const decls = collectDeclarations(sf);
-        if (decls.length === 0) return textResult(`No declarations found in ${filePath}.`);
+    safeTool("list declarations", ({ path: filePath }) => {
+      const sf = parseFile(filePath);
+      const decls = collectDeclarations(sf);
+      if (decls.length === 0) return textResult(`No declarations found in ${filePath}.`);
 
-        const lines: string[] = [];
-        for (const d of decls) {
-          const exp = d.exported ? " (exported)" : "";
-          lines.push(`${d.kind} ${d.name}: ${d.type}${exp} [line ${d.line}]`);
-        }
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to list declarations: ${(e as Error).message}`);
+      const lines: string[] = [];
+      for (const d of decls) {
+        const exp = d.exported ? " (exported)" : "";
+        lines.push(`${d.kind} ${d.name}: ${d.type}${exp} [line ${d.line}]`);
       }
-    },
+      return textResult(lines.join("\n"));
+    }),
   );
 
   server.tool(
     "list_exports",
     "Lists all exported symbols with their kind (function, class, interface, type, variable, re-export)",
     { path: z.string().describe("Absolute path to the TS/JS file") },
-    async ({ path: filePath }) => {
-      try {
-        const sf = parseFile(filePath);
-        const exps = collectExports(sf);
-        if (exps.length === 0) return textResult(`No exports found in ${filePath}.`);
+    safeTool("list exports", ({ path: filePath }) => {
+      const sf = parseFile(filePath);
+      const exps = collectExports(sf);
+      if (exps.length === 0) return textResult(`No exports found in ${filePath}.`);
 
-        const lines: string[] = [];
-        for (const e of exps) {
-          const def = e.isDefault ? " (default)" : "";
-          lines.push(`${e.name} [${e.kind}]${def} [line ${e.line}]`);
-        }
-        return textResult(lines.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to list exports: ${(e as Error).message}`);
+      const lines: string[] = [];
+      for (const e of exps) {
+        const def = e.isDefault ? " (default)" : "";
+        lines.push(`${e.name} [${e.kind}]${def} [line ${e.line}]`);
       }
-    },
+      return textResult(lines.join("\n"));
+    }),
   );
 }

@@ -3,7 +3,7 @@ import path from "node:path";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { parseFile, getLineRange, isExported, isArrowOrFunctionExpr, listTsFiles } from "../parse.js";
-import { type FileSymbol, formatSymbols, textResult, errorResult } from "../format.js";
+import { type FileSymbol, formatSymbols, textResult, safeTool } from "../format.js";
 
 function collectSymbols(sourceFile: ts.SourceFile): FileSymbol[] {
   const symbols: FileSymbol[] = [];
@@ -105,15 +105,11 @@ export function register(server: McpServer) {
     "analyze_file",
     "Provides a high-level summary of all symbols (classes, interfaces, types, enums, functions) in a TypeScript/JavaScript file",
     { path: z.string().describe("Absolute path to the TS/JS file") },
-    async ({ path: filePath }) => {
-      try {
-        const sf = parseFile(filePath);
-        const symbols = collectSymbols(sf);
-        return textResult(formatSymbols(symbols, filePath));
-      } catch (e) {
-        return errorResult(`Failed to analyze ${filePath}: ${(e as Error).message}`);
-      }
-    },
+    safeTool(({ path: filePath }) => `analyze ${filePath}`, ({ path: filePath }) => {
+      const sf = parseFile(filePath);
+      const symbols = collectSymbols(sf);
+      return textResult(formatSymbols(symbols, filePath));
+    }),
   );
 
   server.tool(
@@ -123,26 +119,22 @@ export function register(server: McpServer) {
       path: z.string().describe("Absolute path to the directory"),
       include_tests: z.boolean().optional().default(false).describe("Include test files (default: false)"),
     },
-    async ({ path: dirPath, include_tests }) => {
-      try {
-        let files = listTsFiles(dirPath, true);
-        if (!include_tests) {
-          files = files.filter(f => !f.includes(".test.") && !f.includes(".spec.") && !f.includes("__tests__"));
-        }
-        if (files.length === 0) return textResult(`No TypeScript/JavaScript files found in ${dirPath}.`);
-
-        const sections: string[] = [`Package: ${dirPath}`, `Files: ${files.length}`, ""];
-        for (const file of files) {
-          const sf = parseFile(file);
-          const symbols = collectSymbols(sf);
-          const rel = path.relative(dirPath, file);
-          sections.push(formatSymbols(symbols, rel));
-          sections.push("");
-        }
-        return textResult(sections.join("\n"));
-      } catch (e) {
-        return errorResult(`Failed to analyze ${dirPath}: ${(e as Error).message}`);
+    safeTool(({ path: dirPath }) => `analyze ${dirPath}`, ({ path: dirPath, include_tests }) => {
+      let files = listTsFiles(dirPath, true);
+      if (!include_tests) {
+        files = files.filter(f => !f.includes(".test.") && !f.includes(".spec.") && !f.includes("__tests__"));
       }
-    },
+      if (files.length === 0) return textResult(`No TypeScript/JavaScript files found in ${dirPath}.`);
+
+      const sections: string[] = [`Package: ${dirPath}`, `Files: ${files.length}`, ""];
+      for (const file of files) {
+        const sf = parseFile(file);
+        const symbols = collectSymbols(sf);
+        const rel = path.relative(dirPath, file);
+        sections.push(formatSymbols(symbols, rel));
+        sections.push("");
+      }
+      return textResult(sections.join("\n"));
+    }),
   );
 }
