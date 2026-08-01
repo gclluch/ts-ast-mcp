@@ -2,11 +2,14 @@ import ts from "typescript";
 import path from "node:path";
 import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseFile, isExported, isArrowOrFunctionExpr, listTsFiles, getLineRange, bindingNames } from "../parse.js";
+import { parseFile, isExported, isArrowOrFunctionExpr, listTsFiles, getLineRange, bindingNames, getVisibility } from "../parse.js";
 import { textResult, safeTool } from "../format.js";
 
 interface UnexportedSymbol {
+  /** How it reads in the report, e.g. `Sedan.secret`. */
   name: string;
+  /** The bare identifier to count occurrences of. Defaults to `name`. */
+  lookup?: string;
   kind: string;
   file: string;
   line: number;
@@ -54,13 +57,51 @@ function collectUnexportedSymbols(sourceFile: ts.SourceFile, filePath: string): 
   return symbols;
 }
 
+/**
+ * Class members no other file can reach: `private`, or a `#name`.
+ *
+ * These are as module-local as an unexported function, and were the one kind
+ * of dead code this tool could never report - it only ever looked at top-level
+ * declarations, so a private method nobody calls stayed invisible.
+ *
+ * `protected` is deliberately excluded: a subclass in another file may use it,
+ * and this tool does not read other files.
+ */
+function collectPrivateMembers(sourceFile: ts.SourceFile, filePath: string): UnexportedSymbol[] {
+  const symbols: UnexportedSymbol[] = [];
+
+  function visit(node: ts.Node) {
+    if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+      const className = node.name?.getText(sourceFile) ?? "<anonymous>";
+      for (const member of node.members) {
+        if (!member.name) continue;
+        const isHashPrivate = ts.isPrivateIdentifier(member.name);
+        if (!isHashPrivate && getVisibility(member) !== "private") continue;
+        const kind = ts.isMethodDeclaration(member) ? "private method"
+          : ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)
+            ? "private accessor"
+            : "private field";
+        const [line] = getLineRange(sourceFile, member);
+        const bare = member.name.getText(sourceFile);
+        symbols.push({ name: `${className}.${bare}`, lookup: bare, kind, file: filePath, line });
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  ts.forEachChild(sourceFile, visit);
+  return symbols;
+}
+
 /** Occurrence count per identifier name. Counts, not just presence, so a
  *  symbol's own declaration can be told apart from real uses. */
 function countIdentifiers(sourceFile: ts.SourceFile): Map<string, number> {
   const counts = new Map<string, number>();
 
   function visit(node: ts.Node) {
-    if (ts.isIdentifier(node)) {
+    // A `#name` is a PrivateIdentifier, not an Identifier: counting only the
+    // latter left every `#field` at zero occurrences, declaration included.
+    if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) {
       const name = node.getText(sourceFile);
       counts.set(name, (counts.get(name) ?? 0) + 1);
     }
@@ -74,7 +115,9 @@ function countIdentifiers(sourceFile: ts.SourceFile): Map<string, number> {
 export function register(server: McpServer) {
   server.tool(
     "dead_code",
-    "Finds unreferenced unexported symbols (functions, types, variables) within a directory",
+    "Finds unreferenced module-local symbols within a directory: unexported functions, " +
+      "types and variables, plus 'private' and '#name' class members. Reports a symbol " +
+      "never named anywhere but its own declaration.",
     {
       path: z.string().describe("Absolute path to the directory"),
       include_tests: z.boolean().optional().default(false).describe("Include test files (default: false)"),
@@ -102,8 +145,12 @@ export function register(server: McpServer) {
       for (const file of files) {
         const sf = parseFile(file);
         const counts = countIdentifiers(sf);
-        for (const sym of collectUnexportedSymbols(sf, file)) {
-          if ((counts.get(sym.name) ?? 0) <= 1) dead.push(sym);
+        const candidates = [
+          ...collectUnexportedSymbols(sf, file),
+          ...collectPrivateMembers(sf, file),
+        ];
+        for (const sym of candidates) {
+          if ((counts.get(sym.lookup ?? sym.name) ?? 0) <= 1) dead.push(sym);
         }
       }
 
