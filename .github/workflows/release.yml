@@ -1,12 +1,13 @@
 name: release
 
-# Publishes to npm on a version tag.
+# Publishes to npm on a version tag, tokenless.
 #
-# The token is the only reason this is not tokenless like the Python sibling:
-# npm trusted publishing is configured per package on npmjs.com, which requires
-# the package to already exist. Once the first release is up, add the trusted
-# publisher there and this can drop NPM_TOKEN and rely on the OIDC token that
-# `id-token: write` already mints for provenance.
+# npm is configured as a trusted publisher for this package (npmjs.com ->
+# ts-ast-mcp -> Settings -> Trusted Publisher: gclluch/ts-ast-mcp, release.yml),
+# so the registry verifies this workflow's OIDC identity claim directly. There
+# is no NPM_TOKEN in this repo or its secrets - which is why `id-token: write`
+# below is load-bearing twice over: it mints both the publish credential and
+# the provenance attestation.
 
 on:
   push:
@@ -25,6 +26,14 @@ jobs:
           node-version: "22"
           cache: npm
           registry-url: https://registry.npmjs.org
+
+      # Node 22 ships npm 10, which has no OIDC support and would fall back to
+      # looking for a token that does not exist. Trusted publishing landed in
+      # npm 11.5.1.
+      - name: npm new enough for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       # The tag is what a user sees; package.json is what npm records. A
       # mismatch publishes an immutable, wrongly-numbered release - npm does not
@@ -52,6 +61,5 @@ jobs:
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
             | ts-ast-mcp | grep -q '"serverInfo"'
 
+      # No NODE_AUTH_TOKEN: the OIDC exchange is the credential.
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
