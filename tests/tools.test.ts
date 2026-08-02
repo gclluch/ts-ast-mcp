@@ -236,6 +236,21 @@ describe("tools over stdio", () => {
   beforeAll(async () => { server = new Server(); await server.start(); }, 30_000);
   afterAll(() => server?.stop());
 
+  it("reports the version package.json declares", async () => {
+    // A literal in index.ts drifts the moment `npm version` bumps
+    // package.json, and this string is what every MCP client displays. The
+    // Python sibling shipped a release reporting the previous version.
+    const r = await server.request("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1" },
+    });
+    const declared = JSON.parse(
+      fs.readFileSync(path.join(HERE, "..", "package.json"), "utf-8"),
+    ).version;
+    expect(r.result.serverInfo.version).toBe(declared);
+  });
+
   it("exposes 20 tools", async () => {
     const r = await server.request("tools/list", {});
     expect(r.result.tools).toHaveLength(20);
